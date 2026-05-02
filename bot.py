@@ -218,55 +218,90 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= GENERATION =================
+# ================= УЛУЧШЕННАЯ ГЕНЕРАЦИЯ С ПОВТОРАМИ =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    """Генерация через бесплатные API"""
-    
     import urllib.parse
     encoded = urllib.parse.quote(prompt)
-    
+
+    # Список надежных API (если один упадет, бот попробует другой)
     apis = [
-        f"https://image.pollinations.ai/prompt/{encoded}",
-        f"https://pollinations.ai/api/v1/generate?prompt={encoded}&width=1024&height=1024",
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
+        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024", # основной
+        f"https://image.pollinations.ai/prompt/{encoded}",                          # запасной
+        f"https://pollinations.ai/api/v1/generate?prompt={encoded}&width=1024&height=1024" # последний шанс
     ]
     
     async with aiohttp.ClientSession() as session:
         for i, url in enumerate(apis):
             try:
-                logger.info(f"[GEN] Попытка {i+1}: {url[:80]}...")
-                async with session.get(url, timeout=25) as resp:
+                logger.info(f"[GEN] Попытка {i+1}...")
+                async with session.get(url, timeout=30) as resp:
                     if resp.status == 200:
                         img_data = await resp.read()
-                        if len(img_data) > 10000:
-                            logger.info(f"[GEN] ✅ Успех! Размер: {len(img_data)} байт")
+                        # Проверяем, что скачалось именно изображение (хотя бы 5 КБ)
+                        if len(img_data) > 5000: 
+                            logger.info(f"[GEN] ✅ Успех на попытке {i+1}!")
                             return BytesIO(img_data)
                         else:
-                            logger.warning(f"[GEN] Слишком маленький файл: {len(img_data)}")
+                            logger.warning(f"[GEN] Файл слишком маленький ({len(img_data)} байт)")
             except asyncio.TimeoutError:
-                logger.warning(f"[GEN] Таймаут API {i+1}")
+                logger.warning(f"[GEN] Таймаут на попытке {i+1}")
             except Exception as e:
-                logger.warning(f"[GEN] Ошибка API {i+1}: {e}")
-    
-    logger.error("[GEN] ❌ Все API не ответили")
+                logger.warning(f"[GEN] Ошибка на попытке {i+1}: {e}")
+            
+            await asyncio.sleep(1) # Небольшая пауза между попытками
+
+    logger.error("[GEN] ❌ Все API не ответили после всех попыток")
     return None
 
-# ================= EDIT =================
+
+# ================= УЛУЧШЕННОЕ РЕДАКТИРОВАНИЕ С ПОВТОРАМИ =================
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Реальное редактирование через фильтры и генерацию"""
-    
     import urllib.parse
     image_bytes.seek(0)
     
+    # Сначала пробуем быстрые фильтры
+    edited_img = await apply_filters(image_bytes, prompt)
+    if edited_img:
+        return edited_img
+        
+    # Если фильтры не подошли — генерируем через API с повторами
+    encoded = urllib.parse.quote(prompt)
+    apis = [
+        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024",
+        f"https://image.pollinations.ai/prompt/{encoded}",
+    ]
+    
+    async with aiohttp.ClientSession() as session:
+        for i, url in enumerate(apis):
+            try:
+                logger.info(f"[EDIT] API попытка {i+1}...")
+                async with session.get(url, timeout=30) as resp:
+                    if resp.status == 200:
+                        img_data = await resp.read()
+                        if len(img_data) > 5000:
+                            logger.info(f"[EDIT] ✅ Успех на попытке {i+1}!")
+                            return BytesIO(img_data)
+            except asyncio.TimeoutError:
+                logger.warning(f"[EDIT] Таймаут на попытке {i+1}")
+            except Exception as e:
+                logger.warning(f"[EDIT] Ошибка на попытке {i+1}: {e}")
+            await asyncio.sleep(1)
+            
+    logger.error("[EDIT] ❌ API не сработал, фильтры не подошли")
+    return None
+
+
+# ================= ФИЛЬТРЫ (ВЫНЕСЕНЫ В ОТДЕЛЬНУЮ ФУНКЦИЮ) =================
+async def apply_filters(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
+    """Применяет фильтры к изображению (черно-белый, сепия и т.д.)"""
     try:
         img = Image.open(image_bytes)
         prompt_lower = prompt.lower()
         
         # Чёрно-белый
         if any(word in prompt_lower for word in ["черно-белый", "черно белый", "чёрно-белый", "чёрно белый", "b/w", "black and white", "grayscale", "серый"]):
-            img = img.convert("L")
-            img = img.convert("RGB")
-            logger.info("[EDIT] Применён эффект: чёрно-белый")
+            img = img.convert("L").convert("RGB")
+            logger.info("[EDIT] Применён фильтр: чёрно-белый")
             output = BytesIO()
             img.save(output, format="PNG")
             output.seek(0)
@@ -274,73 +309,43 @@ async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
         
         # Сепия
         elif "сепия" in prompt_lower or "sepia" in prompt_lower:
-            import numpy as np
-            img_array = np.array(img)
-            sepia_filter = np.array([[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]])
-            img_array = np.dot(img_array[:,:,:3], sepia_filter.T)
-            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-            img = Image.fromarray(img_array)
-            logger.info("[EDIT] Применён эффект: сепия")
-            output = BytesIO()
-            img.save(output, format="PNG")
-            output.seek(0)
-            return output
+            try:
+                import numpy as np
+                img_array = np.array(img)
+                sepia_filter = np.array([[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]])
+                img_array = np.dot(img_array[:,:,:3], sepia_filter.T)
+                img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+                img = Image.fromarray(img_array)
+                logger.info("[EDIT] Применён фильтр: сепия")
+                output = BytesIO()
+                img.save(output, format="PNG")
+                output.seek(0)
+                return output
+            except ImportError:
+                logger.warning("numpy не установлен, фильтр сепии недоступен")
         
-        # Увеличение контраста
+        # Другие фильтры
         elif "контраст" in prompt_lower or "contrast" in prompt_lower:
             enhancer = ImageEnhance.Contrast(img)
             img = enhancer.enhance(1.5)
-            logger.info("[EDIT] Применён эффект: увеличение контраста")
+            logger.info("[EDIT] Применён фильтр: контраст")
             output = BytesIO()
             img.save(output, format="PNG")
             output.seek(0)
             return output
-        
-        # Яркость
+            
         elif "ярче" in prompt_lower or "bright" in prompt_lower:
             enhancer = ImageEnhance.Brightness(img)
             img = enhancer.enhance(1.3)
-            logger.info("[EDIT] Применён эффект: увеличение яркости")
-            output = BytesIO()
-            img.save(output, format="PNG")
-            output.seek(0)
-            return output
-        
-        # Размытие
-        elif "размытие" in prompt_lower or "blur" in prompt_lower:
-            img = img.filter(ImageFilter.BLUR)
-            logger.info("[EDIT] Применён эффект: размытие")
-            output = BytesIO()
-            img.save(output, format="PNG")
-            output.seek(0)
-            return output
-        
-        # Резкость
-        elif "резкость" in prompt_lower or "sharp" in prompt_lower:
-            img = img.filter(ImageFilter.SHARPEN)
-            logger.info("[EDIT] Применён эффект: резкость")
+            logger.info("[EDIT] Применён фильтр: яркость")
             output = BytesIO()
             img.save(output, format="PNG")
             output.seek(0)
             return output
             
     except Exception as e:
-        logger.warning(f"[EDIT] Filter error: {e}")
-    
-    # Если фильтры не подошли — генерируем новую картинку
-    async with aiohttp.ClientSession() as session:
-        try:
-            encoded = urllib.parse.quote(prompt)
-            url = f"https://image.pollinations.ai/prompt/{encoded}"
-            async with session.get(url, timeout=30) as resp:
-                if resp.status == 200:
-                    img_data = await resp.read()
-                    if len(img_data) > 10000:
-                        logger.info(f"[EDIT] Сгенерирована новая картинка: {prompt[:50]}")
-                        return BytesIO(img_data)
-        except Exception as e:
-            logger.error(f"[EDIT] Generation error: {e}")
-    
+        logger.warning(f"[FILTERS] Ошибка при применении фильтра: {e}")
+        
     return None
 
 # ================= LUNA AD =================
