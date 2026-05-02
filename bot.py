@@ -218,152 +218,108 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= ГЕНЕРАЦИЯ С ЖЁСТКОЙ ПРОВЕРКОЙ =================
+# ================= РАБОТА С POLZA.AI (ЕДИНАЯ ФУНКЦИЯ) =================
+
+async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO | None:
+    """
+    Универсальная функция для Polza.ai
+    - Без reference_image → генерация
+    - С reference_image → редактирование
+    """
+    headers = {
+        "Authorization": f"Bearer {POLZA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "qwen/image",
+        "input": {
+            "prompt": prompt,
+            "aspect_ratio": "1:1",
+            "output_format": "png",
+            "guidance_scale": 7.5
+        },
+        "async": True
+    }
+    
+    # Если есть референсное изображение (для редактирования)
+    if reference_image:
+        reference_image.seek(0)
+        img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
+        payload["input"]["images"] = [img_base64]
+        payload["input"]["strength"] = 0.7
+        logger.info(f"[POLZA] 🖼 Редактирование: {prompt[:50]}")
+    else:
+        logger.info(f"[POLZA] 🎨 Генерация: {prompt[:50]}")
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            # 1. Отправляем запрос
+            async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"[POLZA] Ошибка {resp.status}: {error_text}")
+                    return None
+                data = await resp.json()
+                task_id = data.get("id")
+                logger.info(f"[POLZA] Task ID: {task_id}")
+            
+            # 2. Ожидаем результат
+            for attempt in range(40):
+                await asyncio.sleep(3)
+                
+                async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as resp:
+                    if resp.status != 200:
+                        continue
+                    status_data = await resp.json()
+                    status = status_data.get("status")
+                    logger.info(f"[POLZA] Попытка {attempt+1}/40, статус: {status}")
+                    
+                    if status == "completed":
+                        # Получаем URL результата
+                        output = status_data.get("data", {})
+                        image_url = output.get("url")
+                        
+                        if not image_url:
+                            images = status_data.get("output", {}).get("images", [])
+                            if images:
+                                image_url = images[0].get("url")
+                        
+                        if image_url:
+                            logger.info(f"[POLZA] Скачиваю...")
+                            async with session.get(image_url) as img_resp:
+                                if img_resp.status == 200:
+                                    img_bytes = await img_resp.read()
+                                    logger.info(f"[POLZA] ✅ Успех! Размер: {len(img_bytes)} байт")
+                                    return BytesIO(img_bytes)
+                        else:
+                            logger.error(f"[POLZA] Нет URL в ответе")
+                            return None
+                            
+                    elif status == "failed":
+                        error_msg = status_data.get("error", {}).get("message", "Unknown error")
+                        logger.error(f"[POLZA] ❌ Ошибка: {error_msg}")
+                        return None
+            
+            logger.error("[POLZA] ❌ Таймаут")
+            return None
+            
+        except Exception as e:
+            logger.error(f"[POLZA] Исключение: {e}")
+            return None
+
+
+# ================= generate_image и edit_image (обёртки) =================
+
 async def generate_image(prompt: str) -> BytesIO | None:
-    import urllib.parse
-    encoded = urllib.parse.quote(prompt)
-    
-    apis = [
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true",
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024",
-        f"https://pollinations.ai/api/v1/generate?prompt={encoded}&width=1024&height=1024"
-    ]
-    
-    async with aiohttp.ClientSession() as session:
-        for i, url in enumerate(apis):
-            try:
-                logger.info(f"[GEN] Попытка {i+1}/{len(apis)}")
-                async with session.get(url, timeout=30) as resp:
-                    logger.info(f"[GEN] HTTP статус: {resp.status}")
-                    
-                    if resp.status == 200:
-                        img_data = await resp.read()
-                        logger.info(f"[GEN] Получено байт: {len(img_data)}")
-                        
-                        is_png = len(img_data) > 8 and img_data[:8] == b'\x89PNG\r\n\x1a\n'
-                        is_jpg = len(img_data) > 2 and img_data[:2] == b'\xff\xd8'
-                        is_valid_size = len(img_data) > 10000
-                        
-                        if (is_png or is_jpg) and is_valid_size:
-                            logger.info(f"[GEN] ✅ Успех! Формат: {'PNG' if is_png else 'JPEG'}")
-                            return BytesIO(img_data)
-                        else:
-                            logger.warning(f"[GEN] Битая картинка! PNG:{is_png} JPG:{is_jpg} Размер:{len(img_data)}")
-                    else:
-                        logger.warning(f"[GEN] HTTP {resp.status}")
-                        
-            except asyncio.TimeoutError:
-                logger.warning(f"[GEN] Таймаут {i+1}")
-            except Exception as e:
-                logger.warning(f"[GEN] Ошибка: {e}")
-            
-            await asyncio.sleep(1)
-    
-    logger.error("[GEN] ❌ Все API не ответили")
-    return None
+    """Генерация через Polza.ai"""
+    return await polza_request(prompt, reference_image=None)
 
 
-# ================= РЕДАКТИРОВАНИЕ С ЖЁСТКОЙ ПРОВЕРКОЙ =================
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    import urllib.parse
-    image_bytes.seek(0)
-    
-    filtered = await apply_filters(image_bytes, prompt)
-    if filtered:
-        return filtered
-    
-    encoded = urllib.parse.quote(prompt)
-    apis = [
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true",
-        f"https://image.pollinations.ai/prompt/{encoded}"
-    ]
-    
-    async with aiohttp.ClientSession() as session:
-        for i, url in enumerate(apis):
-            try:
-                logger.info(f"[EDIT] API попытка {i+1}/{len(apis)}")
-                async with session.get(url, timeout=30) as resp:
-                    logger.info(f"[EDIT] HTTP статус: {resp.status}")
-                    
-                    if resp.status == 200:
-                        img_data = await resp.read()
-                        logger.info(f"[EDIT] Получено байт: {len(img_data)}")
-                        
-                        is_png = len(img_data) > 8 and img_data[:8] == b'\x89PNG\r\n\x1a\n'
-                        is_jpg = len(img_data) > 2 and img_data[:2] == b'\xff\xd8'
-                        is_valid_size = len(img_data) > 10000
-                        
-                        if (is_png or is_jpg) and is_valid_size:
-                            logger.info(f"[EDIT] ✅ Успех!")
-                            return BytesIO(img_data)
-                        else:
-                            logger.warning(f"[EDIT] Битая картинка!")
-                    else:
-                        logger.warning(f"[EDIT] HTTP {resp.status}")
-                        
-            except asyncio.TimeoutError:
-                logger.warning(f"[EDIT] Таймаут {i+1}")
-            except Exception as e:
-                logger.warning(f"[EDIT] Ошибка: {e}")
-            
-            await asyncio.sleep(1)
-    
-    logger.error("[EDIT] ❌ Не удалось получить картинку")
-    return None
+    """Редактирование через Polza.ai"""
+    return await polza_request(prompt, reference_image=image_bytes)
 
-
-# ================= ФИЛЬТРЫ =================
-async def apply_filters(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    try:
-        img = Image.open(image_bytes)
-        prompt_lower = prompt.lower()
-        
-        if any(word in prompt_lower for word in ["черно-белый", "черно белый", "чёрно-белый", "чёрно белый", "b/w", "black and white", "grayscale", "серый"]):
-            img = img.convert("L").convert("RGB")
-            logger.info("[EDIT] Применён фильтр: чёрно-белый")
-            output = BytesIO()
-            img.save(output, format="PNG")
-            output.seek(0)
-            return output
-        
-        elif "сепия" in prompt_lower or "sepia" in prompt_lower:
-            try:
-                import numpy as np
-                img_array = np.array(img)
-                sepia_filter = np.array([[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]])
-                img_array = np.dot(img_array[:,:,:3], sepia_filter.T)
-                img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-                img = Image.fromarray(img_array)
-                logger.info("[EDIT] Применён фильтр: сепия")
-                output = BytesIO()
-                img.save(output, format="PNG")
-                output.seek(0)
-                return output
-            except ImportError:
-                logger.warning("numpy не установлен")
-        
-        elif "контраст" in prompt_lower or "contrast" in prompt_lower:
-            enhancer = ImageEnhance.Contrast(img)
-            img = enhancer.enhance(1.5)
-            logger.info("[EDIT] Применён фильтр: контраст")
-            output = BytesIO()
-            img.save(output, format="PNG")
-            output.seek(0)
-            return output
-            
-        elif "ярче" in prompt_lower or "bright" in prompt_lower:
-            enhancer = ImageEnhance.Brightness(img)
-            img = enhancer.enhance(1.3)
-            logger.info("[EDIT] Применён фильтр: яркость")
-            output = BytesIO()
-            img.save(output, format="PNG")
-            output.seek(0)
-            return output
-            
-    except Exception as e:
-        logger.warning(f"[FILTERS] Ошибка: {e}")
-        
-    return None
 
 # ================= LUNA AD =================
 async def send_luna_ad(message: types.Message):
@@ -428,11 +384,6 @@ async def cmd_help(message: types.Message):
         "📖 *Помощь*\n\n"
         "**Генерация:** напиши описание\n"
         "**Редактирование:** отправь фото + подпись\n\n"
-        "**Доступные эффекты:**\n"
-        "• чёрно-белый\n"
-        "• сепия\n"
-        "• увеличить контраст\n"
-        "• сделать ярче\n\n"
         "**Команды:**\n"
         "/start — главное меню\n"
         "/status — статистика\n"
@@ -565,7 +516,7 @@ async def payment_success(message: SuccessfulPayment):
 
 # ================= PROCESS =================
 async def process_generation(message: types.Message, prompt: str):
-    status_msg = await message.answer(f"🎨 *Генерирую:* {prompt[:50]}...\n⏳ 10-20 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🎨 *Генерирую:* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     img = await generate_image(prompt)
     
@@ -589,7 +540,7 @@ async def process_generation(message: types.Message, prompt: str):
     else:
         await status_msg.edit_text(
             "❌ *Ошибка генерации*\n\n"
-            "Сервер временно недоступен. Попробуй:\n"
+            "Сервер Polza.ai временно недоступен. Попробуй:\n"
             "• Написать на английском\n"
             "• Повторить через минуту\n\n"
             "🌙 @LunaIsLovelyLunaBot",
@@ -597,7 +548,7 @@ async def process_generation(message: types.Message, prompt: str):
         )
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую:* {prompt[:50]}...\n⏳ 10-20 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🖼 *Редактирую:* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     edited = await edit_image(image_bytes, prompt)
     
