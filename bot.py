@@ -368,25 +368,6 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
 
 
 # ================= FALLBACK API =================
-async def generate_image_fallback(prompt: str) -> BytesIO | None:
-    """Бесплатная генерация через Pollinations.ai"""
-    import urllib.parse
-    encoded = urllib.parse.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, timeout=30) as resp:
-                if resp.status == 200:
-                    img_data = await resp.read()
-                    if len(img_data) > 5000:
-                        logger.info(f"[FALLBACK] ✅ Успех! Размер: {len(img_data)}")
-                        return BytesIO(img_data)
-        except Exception as e:
-            logger.error(f"[FALLBACK] Ошибка: {e}")
-    return None
-
-# ================= generate_image и edit_image =================
 async def generate_image(prompt: str) -> BytesIO | None:
     """Генерация через OpenAI GPT-Image-1.5 с повтором"""
     result = await generate_with_openai(prompt)
@@ -394,10 +375,6 @@ async def generate_image(prompt: str) -> BytesIO | None:
         return result
     logger.warning("[GEN] OpenAI не ответил, пробуем fallback")
     return await generate_image_fallback(prompt)
-
-async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Редактирование через OpenAI GPT-Image-1.5 с повтором"""
-    return await generate_with_openai(prompt, reference_image=image_bytes)
 
 # ================= LUNA AD =================
 async def send_luna_ad(message: types.Message):
