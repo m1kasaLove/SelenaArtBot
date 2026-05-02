@@ -233,7 +233,7 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= OPENAI/GPT-IMAGE-1.5 =================
+# ================= OPENAI/GPT-5.4-IMAGE-2 =================
 async def generate_with_openai(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
@@ -243,7 +243,7 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
     enhanced_prompt = enhance_prompt(prompt)
     
     payload = {
-        "model": "openai/gpt-image-1.5",
+        "model": "openai/gpt-5.4-image-2",
         "input": {
             "prompt": enhanced_prompt,
             "size": "1024x1024",
@@ -342,9 +342,7 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
             return None
 
 # ================= generate_image и edit_image =================
-
 async def generate_image(prompt: str) -> BytesIO | None:
-    """Генерация через OpenAI GPT-Image-1.5"""
     result = await generate_with_openai(prompt)
     if result:
         return result
@@ -353,12 +351,10 @@ async def generate_image(prompt: str) -> BytesIO | None:
 
 
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Редактирование через OpenAI GPT-Image-1.5"""
     return await generate_with_openai(prompt, reference_image=image_bytes)
 
 
 async def generate_image_fallback(prompt: str) -> BytesIO | None:
-    """Бесплатная генерация через Pollinations.ai (резерв)"""
     import urllib.parse
     encoded = urllib.parse.quote(prompt)
     url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
@@ -419,7 +415,7 @@ async def cmd_start(message: types.Message):
     
     menu = (
         f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
-        f"🤖 Модель: GPT-Image-1.5\n\n"
+        f"🤖 Модель: GPT-5.4-Image-2\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
         f"🔥 Пригласи друга → +{REFERRAL_REWARD} генераций тебе и ему!\n\n"
         f"📝 Команды в меню слева от смайлика\n\n"
@@ -437,7 +433,7 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "📖 *Помощь*\n\n"
-        "🤖 *Модель:* GPT-Image-1.5\n\n"
+        "🤖 *Модель:* GPT-5.4-Image-2\n\n"
         "**Генерация:** напиши описание\n"
         "**Редактирование:** отправь фото + подпись\n\n"
         "**Команды в меню:**\n"
@@ -572,7 +568,7 @@ async def payment_success(message: SuccessfulPayment):
 
 # ================= PROCESS =================
 async def process_generation(message: types.Message, prompt: str):
-    status_msg = await message.answer(f"🎨 *Генерирую (GPT-Image-1.5):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🎨 *Генерирую (GPT-5.4-Image-2):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     img = await generate_image(prompt)
     
@@ -585,7 +581,7 @@ async def process_generation(message: types.Message, prompt: str):
             
             await message.answer_photo(
                 photo, 
-                caption=f"🎨 *{prompt[:100]}*\n🤖 GPT-Image-1.5 | SelenaArtBot",
+                caption=f"🎨 *{prompt[:100]}*\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
                 parse_mode="Markdown",
                 reply_markup=get_share_keyboard(image_id)
             )
@@ -602,7 +598,7 @@ async def process_generation(message: types.Message, prompt: str):
         )
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую (GPT-Image-1.5):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🖼 *Редактирую (GPT-5.4-Image-2):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     edited = await edit_image(image_bytes, prompt)
     
@@ -614,7 +610,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
         
         await message.answer_photo(
             photo, 
-            caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 GPT-Image-1.5 | SelenaArtBot",
+            caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
             parse_mode="Markdown",
             reply_markup=get_share_keyboard(image_id)
         )
