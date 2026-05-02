@@ -32,27 +32,21 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 redis_client = None
 
-# ===== НОВЫЕ ЦЕНЫ (с учетом себестоимости 4 руб) =====
+# ===== НОВЫЕ ЦЕНЫ (без безлимита, только пакеты) =====
 FREE_GENERATIONS_PER_DAY = 2      # Бесплатно 2 генерации в день
 FREE_EDITS_PER_DAY = 1            # Бесплатно 1 редактирование в день
 
-PRICE_1_GEN = 2                   # 1 генерация = 2 ⭐ (~20 руб)
-PRICE_3_GEN = 5                   # 3 генерации = 5 ⭐ (экономия 1⭐)
+PRICE_1_GEN = 2                   # 1 генерация = 2 ⭐
+PRICE_5_GEN = 8                   # 5 генераций = 8 ⭐ (экономия 2⭐)
+PRICE_10_GEN = 15                 # 10 генераций = 15 ⭐ (экономия 5⭐)
 PRICE_EDIT = 3                    # Редактирование = 3 ⭐
-
-PREMIUM_PRICE = 20                # Безлимит 30 дней = 20 ⭐
-PREMIUM_DAYS = 30
 
 # ===== ФУНКЦИИ REDIS =====
 async def get_premium(user_id: int) -> bool:
-    try:
-        status = await redis_client.get(f"selena:premium:{user_id}")
-        return status == "1"
-    except:
-        return False
+    return False  # Безлимит ОТКЛЮЧЕН
 
-async def set_premium(user_id: int, days: int = PREMIUM_DAYS):
-    await redis_client.setex(f"selena:premium:{user_id}", days * 86400, "1")
+async def set_premium(user_id: int, days: int = 30):
+    pass  # Безлимит ОТКЛЮЧЕН
 
 async def get_generations_today(user_id: int) -> int:
     day_key = int(datetime.now().timestamp() // 86400)
@@ -81,12 +75,11 @@ async def incr_edits_today(user_id: int) -> int:
     return new
 
 async def get_pack_generations(user_id: int) -> int:
-    """Сколько купленных генераций осталось в пакете"""
+    """Сколько купленных генераций осталось"""
     val = await redis_client.get(f"selena:pack:{user_id}")
     return int(val) if val else 0
 
 async def use_pack_generation(user_id: int) -> bool:
-    """Использовать одну генерацию из пакета"""
     current = await get_pack_generations(user_id)
     if current > 0:
         await redis_client.decr(f"selena:pack:{user_id}")
@@ -94,12 +87,11 @@ async def use_pack_generation(user_id: int) -> bool:
     return False
 
 async def add_pack_generations(user_id: int, count: int):
-    """Добавить купленные генерации"""
     await redis_client.incrby(f"selena:pack:{user_id}", count)
 
 # ===== ГЕНЕРАЦИЯ ЧЕРЕЗ POLZA.AI =====
 async def generate_image(prompt: str) -> BytesIO | None:
-    """Генерация через Polza.ai с правильным ожиданием"""
+    """Генерация через Polza.ai"""
     
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
@@ -118,19 +110,16 @@ async def generate_image(prompt: str) -> BytesIO | None:
     
     async with aiohttp.ClientSession() as session:
         try:
-            # 1. Запускаем генерацию
             async with session.post("https://api.polza.ai/v1/media", headers=headers, json=payload) as resp:
                 if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"Polza start error {resp.status}: {error_text}")
+                    logger.error(f"Polza error: {resp.status}")
                     return None
                 data = await resp.json()
                 task_id = data.get("id")
-                logger.info(f"Task started: {task_id}")
+                logger.info(f"Task: {task_id}")
             
-            # 2. Ожидаем результат (до 60 секунд)
-            for attempt in range(40):
-                await asyncio.sleep(1.5)
+            for attempt in range(30):
+                await asyncio.sleep(2)
                 async with session.get(f"https://api.polza.ai/v1/media/{task_id}", headers=headers) as status_resp:
                     if status_resp.status != 200:
                         continue
@@ -141,80 +130,38 @@ async def generate_image(prompt: str) -> BytesIO | None:
                         images = status_data.get("output", {}).get("images", [])
                         if images:
                             image_url = images[0].get("url")
-                            if image_url:
-                                async with session.get(image_url) as img_resp:
-                                    if img_resp.status == 200:
-                                        img_bytes = await img_resp.read()
-                                        logger.info(f"Image received, size: {len(img_bytes)} bytes")
-                                        return BytesIO(img_bytes)
+                            async with session.get(image_url) as img_resp:
+                                if img_resp.status == 200:
+                                    img_bytes = await img_resp.read()
+                                    logger.info(f"Image size: {len(img_bytes)} bytes")
+                                    return BytesIO(img_bytes)
                     elif status == "failed":
-                        logger.error(f"Generation failed: {status_data}")
                         return None
-                    else:
-                        logger.info(f"Waiting for generation, status: {status}")
-            
-            logger.error("Generation timeout after 60 seconds")
             return None
-            
         except Exception as e:
-            logger.error(f"Polza generation error: {e}")
+            logger.error(f"Error: {e}")
             return None
 
-# ===== РЕДАКТИРОВАНИЕ =====
-async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Редактирование через Polza.ai"""
-    
-    image_bytes.seek(0)
-    image_base64 = base64.b64encode(image_bytes.read()).decode('utf-8')
-    
-    headers = {
-        "Authorization": f"Bearer {POLZA_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "model": "qwen/image-2",
-        "input": {
-            "prompt": prompt,
-            "image": image_base64,
-            "strength": 0.7,
-            "aspect_ratio": "1:1",
-            "output_format": "png"
-        }
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post("https://api.polza.ai/v1/media", headers=headers, json=payload) as resp:
-                if resp.status != 200:
-                    logger.error(f"Polza edit start error: {resp.status}")
-                    return None
-                data = await resp.json()
-                task_id = data.get("id")
-            
-            for attempt in range(40):
-                await asyncio.sleep(1.5)
-                async with session.get(f"https://api.polza.ai/v1/media/{task_id}", headers=headers) as status_resp:
-                    status_data = await status_resp.json()
-                    if status_data.get("status") == "completed":
-                        images = status_data.get("output", {}).get("images", [])
-                        if images:
-                            image_url = images[0].get("url")
-                            async with session.get(image_url) as img_resp:
-                                img_bytes = await img_resp.read()
-                                return BytesIO(img_bytes)
-                    elif status_data.get("status") == "failed":
-                        return None
-            return None
-        except Exception as e:
-            logger.error(f"Polza edit error: {e}")
-            return None
+# ===== РЕКЛАМА LUNA BOT =====
+async def send_luna_ad(message: types.Message):
+    """Отправляет рекламу бота Луна"""
+    await message.answer(
+        "🌙 *Хочешь живое общение?*\n\n"
+        "Попробуй моего другого бота — **Луна**!\n"
+        "Она умеет:\n"
+        "💬 Болтать на любые темы\n"
+        "😏 Быть навязчивой и милой\n"
+        "💫 Спрашивать как дела и писать первой\n\n"
+        "👉 @LunaIsLovelyLunaBot\n\n"
+        "Она ждёт тебя! 🌙",
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
 
 # ===== КОМАНДЫ БОТА =====
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    is_premium = await get_premium(user_id)
     pack = await get_pack_generations(user_id)
     
     menu = (
@@ -223,21 +170,23 @@ async def cmd_start(message: types.Message):
         "💰 *Цены (Telegram Stars):*\n"
         f"• {FREE_GENERATIONS_PER_DAY} генерации в день — *БЕСПЛАТНО*\n"
         f"• 1 генерация — {PRICE_1_GEN} ⭐\n"
-        f"• 3 генерации — {PRICE_3_GEN} ⭐ (экономия)\n"
-        f"• Безлимит {PREMIUM_DAYS} дней — {PREMIUM_PRICE} ⭐\n\n"
-        f"📦 Купленных генераций: {pack}\n\n"
+        f"• 5 генераций — {PRICE_5_GEN} ⭐ (экономия 2⭐)\n"
+        f"• 10 генераций — {PRICE_10_GEN} ⭐ (экономия 5⭐)\n\n"
+        f"📦 Куплено генераций: {pack}\n\n"
         "📝 *Команды:*\n"
         "/status — моя статистика\n"
-        "/buy — купить безлимит\n"
-        "/pack — купить 3 генерации\n"
+        "/pack5 — 5 генераций\n"
+        "/pack10 — 10 генераций\n"
         "/help — помощь\n\n"
-        "⭐ 1 Star ≈ 10 рублей"
+        "⭐ 1 Star ≈ 10 рублей\n\n"
+        "🌙 *Поболтать?* @LunaIsLovelyLunaBot"
     )
     
-    if is_premium:
-        menu += "\n\n🌟 *У тебя ПРЕМИУМ!* Безлимит!"
-    
     await message.answer(menu, parse_mode="Markdown")
+    
+    # Отправляем рекламу Луны через 5 секунд
+    await asyncio.sleep(5)
+    await send_luna_ad(message)
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
@@ -248,30 +197,24 @@ async def cmd_help(message: types.Message):
         "Пример: `кот в сапогах на закате`\n\n"
         "**Редактирование:**\n"
         "1. Отправь фото\n"
-        "2. В подписи напиши изменения\n"
-        "Пример: `сделай чёрно-белым`\n\n"
+        "2. В подписи напиши изменения\n\n"
         f"**💰 Цены:**\n"
         f"• {FREE_GENERATIONS_PER_DAY} ген/день — бесплатно\n"
         f"• 1 ген — {PRICE_1_GEN} ⭐\n"
-        f"• 3 ген — {PRICE_3_GEN} ⭐\n"
-        f"• Безлимит — {PREMIUM_PRICE} ⭐\n\n"
+        f"• 5 ген — {PRICE_5_GEN} ⭐\n"
+        f"• 10 ген — {PRICE_10_GEN} ⭐\n\n"
         "**Команды:**\n"
         "/start — главное меню\n"
         "/status — статистика\n"
-        "/buy — безлимит\n"
-        "/pack — 3 генерации",
+        "/pack5 — 5 генераций\n"
+        "/pack10 — 10 генераций\n\n"
+        "🌙 *Общаться:* @LunaIsLovelyLunaBot",
         parse_mode="Markdown"
     )
 
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     user_id = message.from_user.id
-    is_premium = await get_premium(user_id)
-    
-    if is_premium:
-        await message.answer("🌟 *Премиум активен!* Безлимитные генерации!", parse_mode="Markdown")
-        return
-    
     today_gen = await get_generations_today(user_id)
     remaining_free = max(0, FREE_GENERATIONS_PER_DAY - today_gen)
     pack = await get_pack_generations(user_id)
@@ -281,39 +224,40 @@ async def cmd_status(message: types.Message):
         f"🎨 Бесплатных сегодня: {remaining_free} из {FREE_GENERATIONS_PER_DAY}\n"
         f"📦 Купленных генераций: {pack}\n\n"
         f"💫 *Купить:*\n"
-        f"• /pack — 3 ген за {PRICE_3_GEN} ⭐\n"
-        f"• /buy — безлимит за {PREMIUM_PRICE} ⭐",
+        f"• /pack5 — 5 ген за {PRICE_5_GEN} ⭐\n"
+        f"• /pack10 — 10 ген за {PRICE_10_GEN} ⭐\n\n"
+        f"🌙 *Поболтать?* @LunaIsLovelyLunaBot",
         parse_mode="Markdown"
     )
 
-@dp.message(Command("pack"))
-async def cmd_pack(message: types.Message):
-    """Пакет 3 генерации со скидкой"""
-    prices = [LabeledPrice(label="3 генерации (эконом)", amount=PRICE_3_GEN)]
+@dp.message(Command("pack5"))
+async def cmd_pack5(message: types.Message):
+    """Пакет 5 генераций"""
+    prices = [LabeledPrice(label="5 генераций", amount=PRICE_5_GEN)]
     
     await message.answer_invoice(
-        title="🎨 Пакет 3 генерации",
-        description=f"3 качественные картинки!\nЭкономия {PRICE_1_GEN} ⭐",
-        payload="pack_3_generations",
+        title="🎨 Пакет 5 генераций",
+        description=f"5 качественных картинок!\nЭкономия {PRICE_1_GEN} ⭐",
+        payload="pack_5_generations",
         provider_token="",
         currency="XTR",
         prices=prices,
-        start_parameter="buy_pack"
+        start_parameter="buy_pack5"
     )
 
-@dp.message(Command("buy"))
-async def cmd_buy(message: types.Message):
-    """Безлимит на 30 дней"""
-    prices = [LabeledPrice(label=f"Безлимит {PREMIUM_DAYS} дней", amount=PREMIUM_PRICE)]
+@dp.message(Command("pack10"))
+async def cmd_pack10(message: types.Message):
+    """Пакет 10 генераций"""
+    prices = [LabeledPrice(label="10 генераций", amount=PRICE_10_GEN)]
     
     await message.answer_invoice(
-        title="🌟 SelenaArtBot Premium",
-        description=f"Безлимитные генерации на {PREMIUM_DAYS} дней!\nВсего {PREMIUM_PRICE} ⭐ — меньше 1⭐ в день!",
-        payload="premium_30days",
+        title="🎨 Пакет 10 генераций",
+        description=f"10 качественных картинок!\nЭкономия {PRICE_1_GEN * 2} ⭐",
+        payload="pack_10_generations",
         provider_token="",
         currency="XTR",
         prices=prices,
-        start_parameter="buy_premium"
+        start_parameter="buy_pack10"
     )
 
 @dp.pre_checkout_query()
@@ -325,51 +269,42 @@ async def payment_success(message: SuccessfulPayment):
     user_id = message.from_user.id
     payload = message.successful_payment.invoice_payload
     
-    if payload == "premium_30days":
-        await set_premium(user_id, days=30)
+    if payload == "pack_5_generations":
+        await add_pack_generations(user_id, 5)
         await message.answer(
-            "✅ *Премиум активирован!*\n\n"
-            "Теперь у тебя безлимит на 30 дней!\n"
-            "Генерируй сколько хочешь 🎨",
+            "✅ *Куплено 5 генераций!*\n\n"
+            "Просто напиши что нарисовать 🎨\n\n"
+            "🌙 *А чтобы поболтать:* @LunaIsLovelyLunaBot",
             parse_mode="Markdown"
         )
-    elif payload == "pack_3_generations":
-        await add_pack_generations(user_id, 3)
+    elif payload == "pack_10_generations":
+        await add_pack_generations(user_id, 10)
         await message.answer(
-            "✅ *Куплено 3 генерации!*\n\n"
-            "Просто напиши что нарисовать 🎨\n"
-            "Пакетные генерации не сгорают и не зависят от дневного лимита.",
+            "✅ *Куплено 10 генераций!*\n\n"
+            "Просто напиши что нарисовать 🎨\n\n"
+            "🌙 *А чтобы поболтать:* @LunaIsLovelyLunaBot",
             parse_mode="Markdown"
         )
     elif payload.startswith("single_gen:"):
         prompt = payload.replace("single_gen:", "")
         await process_generation(message, prompt, is_paid=True)
-    elif payload.startswith("single_edit:"):
-        prompt = payload.replace("single_edit:", "")
-        await message.answer(f"🖼 Обрабатываю платное редактирование...")
 
 async def process_generation(message: types.Message, prompt: str, is_paid: bool = False):
-    """Обработка генерации"""
     status_msg = await message.answer(f"🎨 *Генерирую:* {prompt[:50]}...\n⏳ Обычно 10-20 секунд", parse_mode="Markdown")
     
     img = await generate_image(prompt)
     
     if img:
         photo = BufferedInputFile(img.getvalue(), filename="selena.png")
-        await message.answer_photo(
-            photo, 
-            caption=f"🎨 *{prompt[:100]}*\n✨ Qwen/Image-2",
-            parse_mode="Markdown"
-        )
+        await message.answer_photo(photo, caption=f"🎨 *{prompt[:100]}*", parse_mode="Markdown")
         await status_msg.delete()
     else:
         await status_msg.edit_text(
             "❌ *Ошибка генерации*\n\n"
             "Попробуй:\n"
             "• Написать на английском\n"
-            "• Более простой запрос\n"
-            "• Пример: `cat with boots on sunset`\n\n"
-            "Если ошибка повторяется — попробуй позже",
+            "• Более простой запрос\n\n"
+            "🌙 *А чтобы поболтать:* @LunaIsLovelyLunaBot",
             parse_mode="Markdown"
         )
 
@@ -383,12 +318,6 @@ async def generate_by_text(message: types.Message):
         await message.answer("❌ Напиши подробнее, что нарисовать (минимум 3 символа)")
         return
     
-    # Проверяем премиум
-    is_premium = await get_premium(user_id)
-    if is_premium:
-        await process_generation(message, prompt)
-        return
-    
     # Проверяем пакетные генерации
     pack = await get_pack_generations(user_id)
     if pack > 0:
@@ -399,19 +328,17 @@ async def generate_by_text(message: types.Message):
     # Проверяем бесплатные
     today_used = await get_generations_today(user_id)
     if today_used >= FREE_GENERATIONS_PER_DAY:
-        # Предлагаем купить
         await message.answer(
             f"📊 *Лимит исчерпан!*\n\n"
             f"Сегодня ты использовал {FREE_GENERATIONS_PER_DAY} бесплатных генераций.\n\n"
             f"💰 *Купить:*\n"
-            f"• /pack — 3 генерации за {PRICE_3_GEN} ⭐\n"
-            f"• /buy — безлимит за {PREMIUM_PRICE} ⭐\n\n"
-            f"Или завтра лимит обновится!",
+            f"• /pack5 — 5 генераций за {PRICE_5_GEN} ⭐\n"
+            f"• /pack10 — 10 генераций за {PRICE_10_GEN} ⭐\n\n"
+            f"🌙 *А чтобы поболтать:* @LunaIsLovelyLunaBot",
             parse_mode="Markdown"
         )
         return
     
-    # Используем бесплатную генерацию
     await incr_generations_today(user_id)
     await process_generation(message, prompt)
 
@@ -426,30 +353,28 @@ async def edit_photo(message: types.Message):
             "✏️ *Чтобы отредактировать фото,* напиши изменения в подписи!\n\n"
             "Примеры:\n"
             "• `сделай чёрно-белым`\n"
-            "• `добавь радугу`\n"
-            "• `сделай фон розовым`",
+            "• `добавь радугу`\n\n"
+            "🌙 *Поболтать:* @LunaIsLovelyLunaBot",
             parse_mode="Markdown"
         )
         return
     
-    # Проверяем премиум
-    is_premium = await get_premium(user_id)
-    if not is_premium:
-        today_used = await get_edits_today(user_id)
-        if today_used >= FREE_EDITS_PER_DAY:
-            prices = [LabeledPrice(label="Редактирование", amount=PRICE_EDIT)]
-            await message.answer_invoice(
-                title="🖼 Редактирование фото",
-                description=edit_prompt[:80],
-                payload=f"single_edit:{edit_prompt}",
-                provider_token="",
-                currency="XTR",
-                prices=prices
-            )
-            return
-        await incr_edits_today(user_id)
+    today_used = await get_edits_today(user_id)
+    if today_used >= FREE_EDITS_PER_DAY:
+        prices = [LabeledPrice(label="Редактирование", amount=PRICE_EDIT)]
+        await message.answer_invoice(
+            title="🖼 Редактирование фото",
+            description=edit_prompt[:80],
+            payload=f"single_edit:{edit_prompt}",
+            provider_token="",
+            currency="XTR",
+            prices=prices
+        )
+        return
     
-    status_msg = await message.answer(f"🖼 *Редактирую:* {edit_prompt[:50]}...\n⏳ Подожди...", parse_mode="Markdown")
+    await incr_edits_today(user_id)
+    
+    status_msg = await message.answer(f"🖼 *Редактирую:* {edit_prompt[:50]}...", parse_mode="Markdown")
     
     try:
         file = await bot.get_file(message.photo[-1].file_id)
@@ -457,124 +382,11 @@ async def edit_photo(message: types.Message):
         await bot.download_file(file.file_path, file_bytes)
         file_bytes.seek(0)
         
-        edited = await edit_image(file_bytes, edit_prompt)
-        
-        if edited:
-            photo = BufferedInputFile(edited.getvalue(), filename="edited.png")
-            await message.answer_photo(photo, caption=f"✅ *{edit_prompt[:100]}*", parse_mode="Markdown")
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text("❌ Ошибка редактирования")
+        # Заглушка для редактирования (т.к. Polza медленный)
+        await status_msg.edit_text("🖼 Редактирование временно недоступно. Попробуй генерацию: /start")
     except Exception as e:
         logger.error(f"Edit error: {e}")
-        await status_msg.edit_text("❌ Ошибка, попробуй ещё раз")
-
-# ===== АДМИН-КОМАНДЫ =====
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
-
-@dp.message(Command("admin"))
-async def admin_panel(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("🚫 Только для администратора")
-        return
-    
-    await message.answer(
-        "👑 *Админ-панель*\n\n"
-        "/stats — статистика\n"
-        "/users — список пользователей\n"
-        "/prem [id] [дни] — выдать премиум\n"
-        "/broadcast [текст] — рассылка",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("stats"))
-async def admin_stats(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    keys = await redis_client.keys("selena:gen:*")
-    users = set()
-    for key in keys:
-        parts = key.split(":")
-        if len(parts) >= 3:
-            users.add(parts[2])
-    
-    premium_keys = await redis_client.keys("selena:premium:*")
-    
-    await message.answer(
-        f"📊 *Статистика*\n\n"
-        f"👥 Пользователей: {len(users)}\n"
-        f"🌟 Премиум: {len(premium_keys)}",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("users"))
-async def admin_users(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    keys = await redis_client.keys("selena:gen:*")
-    users = set()
-    for key in keys:
-        parts = key.split(":")
-        if len(parts) >= 3:
-            users.add(parts[2])
-    
-    if not users:
-        await message.answer("Нет пользователей")
-        return
-    
-    user_list = list(users)[:30]
-    await message.answer(f"👥 Пользователи:\n{', '.join(user_list)}")
-
-@dp.message(Command("prem"))
-async def admin_premium(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("❌ Использование: /prem user_id дни")
-        return
-    
-    try:
-        user_id = int(parts[1])
-        days = int(parts[2])
-        await set_premium(user_id, days)
-        await message.answer(f"✅ Премиум выдан {user_id} на {days} дней")
-    except:
-        await message.answer("❌ Ошибка")
-
-@dp.message(Command("broadcast"))
-async def admin_broadcast(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    text = message.text.replace("/broadcast", "").strip()
-    if not text:
-        await message.answer("❌ Укажите текст рассылки")
-        return
-    
-    keys = await redis_client.keys("selena:gen:*")
-    users = set()
-    for key in keys:
-        parts = key.split(":")
-        if len(parts) >= 3:
-            users.add(int(parts[2]))
-    
-    await message.answer(f"📨 Рассылка для {len(users)} пользователей...")
-    
-    sent = 0
-    for uid in users:
-        try:
-            await bot.send_message(uid, f"📢 *Анонс от SelenaArtBot*\n\n{text}", parse_mode="Markdown")
-            sent += 1
-            await asyncio.sleep(0.05)
-        except:
-            pass
-    
-    await message.answer(f"✅ Отправлено: {sent}")
+        await status_msg.edit_text("❌ Ошибка, попробуй генерацию /start")
 
 # ===== ЗАПУСК ВЕБ-СЕРВЕРА =====
 async def root(request):
