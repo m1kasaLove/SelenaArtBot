@@ -41,9 +41,6 @@ PREMIUM_PRICE = 50
 PREMIUM_DAYS = 30
 
 # ===== ФУНКЦИИ REDIS =====
-async def get_redis():
-    return redis_client
-
 async def get_premium(user_id: int) -> bool:
     try:
         status = await redis_client.get(f"selena:premium:{user_id}")
@@ -80,40 +77,122 @@ async def incr_edits_today(user_id: int) -> int:
     await redis_client.expire(key, 86400)
     return new
 
-# ===== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ =====
+# ===== ГЕНЕРАЦИЯ ЧЕРЕЗ POLZA.AI (КАЧЕСТВЕННО) =====
 async def generate_image(prompt: str) -> BytesIO | None:
-    import urllib.parse
-    encoded_prompt = urllib.parse.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+    """Генерация через Polza.ai Qwen/Image-2"""
+    
+    headers = {
+        "Authorization": f"Bearer {POLZA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Улучшаем промпт для лучшего качества
+    enhanced_prompt = f"High quality, detailed, beautiful: {prompt}"
+    
+    payload = {
+        "model": "qwen/image-2",
+        "input": {
+            "prompt": enhanced_prompt,
+            "aspect_ratio": "1:1",
+            "output_format": "png",
+            "guidance_scale": 7.5
+        },
+        "async": True
+    }
     
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, timeout=45) as resp:
-                if resp.status == 200:
-                    img_data = await resp.read()
-                    if len(img_data) > 1024:
-                        return BytesIO(img_data)
-                return None
+            # Отправляем запрос
+            async with session.post("https://api.polza.ai/v1/media", headers=headers, json=payload) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"Polza API error {resp.status}: {error_text}")
+                    return None
+                data = await resp.json()
+                task_id = data.get("id")
+                logger.info(f"Generation task_id: {task_id}")
+            
+            # Ждём результат (до 30 секунд)
+            for attempt in range(30):
+                await asyncio.sleep(2)
+                async with session.get(f"https://api.polza.ai/v1/media/{task_id}", headers=headers) as status_resp:
+                    if status_resp.status != 200:
+                        continue
+                    status_data = await status_resp.json()
+                    status = status_data.get("status")
+                    
+                    if status == "completed":
+                        images = status_data.get("output", {}).get("images", [])
+                        if images:
+                            image_url = images[0].get("url")
+                            if image_url:
+                                async with session.get(image_url) as img_resp:
+                                    if img_resp.status == 200:
+                                        img_data = await img_resp.read()
+                                        logger.info(f"Image generated, size: {len(img_data)} bytes")
+                                        return BytesIO(img_data)
+                    elif status == "failed":
+                        logger.error(f"Generation failed: {status_data}")
+                        return None
+                    else:
+                        logger.info(f"Waiting... status: {status}")
+            
+            logger.error("Generation timeout")
+            return None
+            
         except Exception as e:
-            logger.error(f"Generation error: {e}")
+            logger.error(f"Polza generation error: {e}")
             return None
 
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    import urllib.parse
-    edit_prompt = f"Edit this image: {prompt}"
-    encoded_prompt = urllib.parse.quote(edit_prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+    """Редактирование через Polza.ai с референсом"""
+    
+    # Конвертируем фото в base64
+    image_bytes.seek(0)
+    image_base64 = base64.b64encode(image_bytes.read()).decode('utf-8')
+    
+    headers = {
+        "Authorization": f"Bearer {POLZA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "qwen/image-2",
+        "input": {
+            "prompt": prompt,
+            "image": image_base64,
+            "strength": 0.7,
+            "aspect_ratio": "1:1",
+            "output_format": "png"
+        },
+        "async": True
+    }
     
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, timeout=60) as resp:
-                if resp.status == 200:
-                    img_data = await resp.read()
-                    if len(img_data) > 1024:
-                        return BytesIO(img_data)
-                return None
+            async with session.post("https://api.polza.ai/v1/media", headers=headers, json=payload) as resp:
+                if resp.status != 200:
+                    logger.error(f"Polza edit API error: {resp.status}")
+                    return None
+                data = await resp.json()
+                task_id = data.get("id")
+            
+            for attempt in range(30):
+                await asyncio.sleep(2)
+                async with session.get(f"https://api.polza.ai/v1/media/{task_id}", headers=headers) as status_resp:
+                    status_data = await status_resp.json()
+                    if status_data.get("status") == "completed":
+                        images = status_data.get("output", {}).get("images", [])
+                        if images:
+                            image_url = images[0].get("url")
+                            async with session.get(image_url) as img_resp:
+                                img_data = await img_resp.read()
+                                return BytesIO(img_data)
+                    elif status_data.get("status") == "failed":
+                        return None
+            return None
         except Exception as e:
-            logger.error(f"Edit error: {e}")
+            logger.error(f"Polza edit error: {e}")
             return None
 
 # ===== КОМАНДЫ БОТА =====
@@ -122,47 +201,19 @@ async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     is_premium = await get_premium(user_id)
     
-    if is_premium:
-        await message.answer(
-            "🌙 *SelenaArtBot* — с возвращением!\n\n"
-            "✨ У тебя активен премиум — безлимит!\n"
-            "Просто напиши что нарисовать 🎨",
-            parse_mode="Markdown"
-        )
-    else:
-        today_gen = await get_generations_today(user_id)
-        today_edit = await get_edits_today(user_id)
-        remaining_gen = max(0, FREE_GENERATIONS_PER_DAY - today_gen)
-        remaining_edit = max(0, FREE_EDITS_PER_DAY - today_edit)
-        
-        await message.answer(
-            f"🌙 *SelenaArtBot* — твой AI-художник!\n\n"
-            f"🎨 Генераций осталось: {remaining_gen} из {FREE_GENERATIONS_PER_DAY}\n"
-            f"🖼 Редактирований: {remaining_edit} из {FREE_EDITS_PER_DAY}\n\n"
-            f"**Что умею:**\n"
-            f"• Напиши текст — нарисую картинку\n"
-            f"• Отправь фото + описание — отредактирую\n\n"
-            f"⭐ Купить премиум: /buy\n"
-            f"📊 Статус: /status\n"
-            f"❓ Помощь: /help",
-            parse_mode="Markdown"
-        )
-
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
     await message.answer(
-        "📖 *Помощь*\n\n"
-        "**Генерация:**\n"
-        "Напиши любое описание\n"
-        "Пример: `кот в космосе`\n\n"
-        "**Редактирование:**\n"
-        "1. Отправь фото\n"
-        "2. В подписи напиши изменения\n"
-        "3. Пример: `сделай чёрно-белым`\n\n"
-        f"**Цены:**\n"
-        f"• Генерация: {PRICE_GENERATION} ⭐\n"
-        f"• Редактирование: {PRICE_EDIT} ⭐\n"
-        f"• Премиум: {PREMIUM_PRICE} ⭐ на {PREMIUM_DAYS} дней",
+        "🎨 *SelenaArtBot* — твой AI-художник!\n\n"
+        "Я использую нейросеть *Qwen/Image-2* для создания качественных изображений.\n\n"
+        "✨ *Что умею:*\n"
+        "• Генерировать картинки из текста\n"
+        "• Редактировать твои фото\n\n"
+        "📝 *Примеры:*\n"
+        "• `кот в сапогах`\n"
+        "• `закат на море`\n"
+        "• `киберпанк город`\n\n"
+        f"🎁 Бесплатно: {FREE_GENERATIONS_PER_DAY} генераций в день\n"
+        f"⭐ Премиум: /buy — {PREMIUM_PRICE}⭐ на {PREMIUM_DAYS} дней\n\n"
+        "/status — твоя статистика",
         parse_mode="Markdown"
     )
 
@@ -172,33 +223,27 @@ async def cmd_status(message: types.Message):
     is_premium = await get_premium(user_id)
     
     if is_premium:
-        await message.answer("🌟 *Премиум активен!* Безлимитные генерации и редактирования!", parse_mode="Markdown")
+        await message.answer("🌟 *Премиум активен!* Безлимитные генерации!", parse_mode="Markdown")
     else:
         today_gen = await get_generations_today(user_id)
-        today_edit = await get_edits_today(user_id)
-        remaining_gen = max(0, FREE_GENERATIONS_PER_DAY - today_gen)
-        remaining_edit = max(0, FREE_EDITS_PER_DAY - today_edit)
-        
+        remaining = max(0, FREE_GENERATIONS_PER_DAY - today_gen)
         await message.answer(
             f"📊 *Твоя статистика*\n\n"
-            f"🎨 Генераций: {remaining_gen} из {FREE_GENERATIONS_PER_DAY}\n"
-            f"🖼 Редактирований: {remaining_edit} из {FREE_EDITS_PER_DAY}\n\n"
-            f"Купи премиум за {PREMIUM_PRICE} ⭐: /buy",
+            f"🎨 Осталось генераций: {remaining} из {FREE_GENERATIONS_PER_DAY}\n\n"
+            f"Купи премиум: /buy",
             parse_mode="Markdown"
         )
 
 @dp.message(Command("buy"))
 async def cmd_buy(message: types.Message):
     prices = [LabeledPrice(label=f"Безлимит {PREMIUM_DAYS} дней", amount=PREMIUM_PRICE)]
-    
     await message.answer_invoice(
         title="SelenaArtBot Premium",
-        description=f"Безлимитные генерации и редактирование на {PREMIUM_DAYS} дней!",
+        description=f"Безлимитные генерации на {PREMIUM_DAYS} дней!",
         payload="premium_30days",
         provider_token="",
         currency="XTR",
-        prices=prices,
-        start_parameter="buy_premium"
+        prices=prices
     )
 
 @dp.pre_checkout_query()
@@ -210,20 +255,18 @@ async def payment_success(message: SuccessfulPayment):
     user_id = message.from_user.id
     await set_premium(user_id, days=30)
     await message.answer(
-        "✅ *Премиум активирован!*\n\n"
-        "Теперь у тебя безлимит на 30 дней!\n"
-        "Генерируй и редактируй сколько хочешь 🎨",
+        "✅ *Премиум активирован!*\n\nТеперь безлимитные генерации! 🎨",
         parse_mode="Markdown"
     )
 
-# ===== ГЕНЕРАЦИЯ ПО ТЕКСТУ =====
+# ===== ГЕНЕРАЦИЯ =====
 @dp.message(F.text & ~F.text.startswith('/'))
 async def generate_by_text(message: types.Message):
     user_id = message.from_user.id
     prompt = message.text.strip()
     
     if len(prompt) < 3:
-        await message.answer("❌ Напиши подробнее, что нарисовать (минимум 3 символа)")
+        await message.answer("❌ Напиши подробнее, что нарисовать")
         return
     
     is_premium = await get_premium(user_id)
@@ -232,7 +275,7 @@ async def generate_by_text(message: types.Message):
     if not is_premium and today_used >= FREE_GENERATIONS_PER_DAY:
         prices = [LabeledPrice(label="Одна генерация", amount=PRICE_GENERATION)]
         await message.answer_invoice(
-            title="Генерация изображения",
+            title="Генерация",
             description=f"Запрос: {prompt[:80]}",
             payload=f"single_gen:{prompt}",
             provider_token="",
@@ -244,179 +287,32 @@ async def generate_by_text(message: types.Message):
     if not is_premium:
         await incr_generations_today(user_id)
     
-    status_msg = await message.answer(f"🎨 Рисую: {prompt[:50]}...")
+    status_msg = await message.answer(f"🎨 *Генерирую:* {prompt[:50]}...\n⏳ Обычно 5-15 секунд", parse_mode="Markdown")
+    
     img = await generate_image(prompt)
     
     if img:
-        photo = BufferedInputFile(img.getvalue(), filename="selena.jpg")
-        await message.answer_photo(photo, caption=f"🌙 *{prompt[:100]}*", parse_mode="Markdown")
+        photo = BufferedInputFile(img.getvalue(), filename="selena.png")
+        await message.answer_photo(photo, caption=f"🎨 *{prompt[:100]}*\n✨ Qwen/Image-2", parse_mode="Markdown")
         await status_msg.delete()
     else:
-        await status_msg.edit_text("❌ Ошибка генерации. Попробуй другой промпт")
-
-# ===== РЕДАКТИРОВАНИЕ ФОТО =====
-@dp.message(F.photo)
-async def edit_photo(message: types.Message):
-    user_id = message.from_user.id
-    edit_prompt = message.caption
-    
-    if not edit_prompt:
-        await message.answer("✏️ Напиши в подписи, что изменить на фото")
-        return
-    
-    is_premium = await get_premium(user_id)
-    today_used = await get_edits_today(user_id)
-    
-    if not is_premium and today_used >= FREE_EDITS_PER_DAY:
-        prices = [LabeledPrice(label="Одно редактирование", amount=PRICE_EDIT)]
-        await message.answer_invoice(
-            title="Редактирование фото",
-            description=edit_prompt[:80],
-            payload=f"single_edit:{edit_prompt}",
-            provider_token="",
-            currency="XTR",
-            prices=prices
+        await status_msg.edit_text(
+            "❌ *Ошибка генерации*\n\n"
+            "Попробуй:\n"
+            "• Написать на английском\n"
+            "• Более простой запрос\n"
+            "• Пример: `cat with boots`",
+            parse_mode="Markdown"
         )
-        return
-    
-    if not is_premium:
-        await incr_edits_today(user_id)
-    
-    status_msg = await message.answer(f"🖼 Редактирую: {edit_prompt[:50]}...")
-    
-    try:
-        file = await bot.get_file(message.photo[-1].file_id)
-        file_bytes = BytesIO()
-        await bot.download_file(file.file_path, file_bytes)
-        file_bytes.seek(0)
-        
-        edited = await edit_image(file_bytes, edit_prompt)
-        
-        if edited:
-            photo = BufferedInputFile(edited.getvalue(), filename="edited.jpg")
-            await message.answer_photo(photo, caption=f"✅ *{edit_prompt[:100]}*", parse_mode="Markdown")
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text("❌ Ошибка редактирования")
-    except Exception as e:
-        logger.error(f"Edit error: {e}")
-        await status_msg.edit_text("❌ Ошибка, попробуй ещё раз")
 
-# ===== АДМИН-КОМАНДЫ =====
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
-
-@dp.message(Command("admin"))
-async def admin_panel(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("🚫 Только для администратора")
-        return
-    
-    await message.answer(
-        "👑 *Админ-панель*\n\n"
-        "/stats — статистика\n"
-        "/users — список пользователей\n"
-        "/prem [id] [дни] — выдать премиум\n"
-        "/broadcast [текст] — рассылка",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("stats"))
-async def admin_stats(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    # Получаем всех пользователей из Redis
-    keys = await redis_client.keys("selena:gen:*")
-    users = set()
-    for key in keys:
-        parts = key.split(":")
-        if len(parts) >= 3:
-            users.add(parts[2])
-    
-    premium_keys = await redis_client.keys("selena:premium:*")
-    
-    await message.answer(f"👥 Пользователей: {len(users)}\n🌟 Премиум: {len(premium_keys)}")
-
-@dp.message(Command("users"))
-async def admin_users(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    keys = await redis_client.keys("selena:gen:*")
-    users = set()
-    for key in keys:
-        parts = key.split(":")
-        if len(parts) >= 3:
-            users.add(parts[2])
-    
-    if not users:
-        await message.answer("Нет пользователей")
-        return
-    
-    user_list = list(users)[:30]
-    await message.answer(f"👥 Пользователи:\n{', '.join(user_list)}")
-
-@dp.message(Command("prem"))
-async def admin_premium(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("❌ Использование: /prem user_id дни")
-        return
-    
-    try:
-        user_id = int(parts[1])
-        days = int(parts[2])
-        await set_premium(user_id, days)
-        await message.answer(f"✅ Премиум выдан {user_id} на {days} дней")
-    except:
-        await message.answer("❌ Ошибка")
-
-@dp.message(Command("broadcast"))
-async def admin_broadcast(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    text = message.text.replace("/broadcast", "").strip()
-    if not text:
-        await message.answer("❌ Укажите текст рассылки")
-        return
-    
-    keys = await redis_client.keys("selena:gen:*")
-    users = set()
-    for key in keys:
-        parts = key.split(":")
-        if len(parts) >= 3:
-            users.add(int(parts[2]))
-    
-    await message.answer(f"📨 Рассылка для {len(users)} пользователей...")
-    
-    sent = 0
-    for uid in users:
-        try:
-            await bot.send_message(uid, f"📢 *Анонс от SelenaArtBot*\n\n{text}", parse_mode="Markdown")
-            sent += 1
-            await asyncio.sleep(0.05)
-        except:
-            pass
-    
-    await message.answer(f"✅ Отправлено: {sent}")
-
-# ===== ЗАПУСК ВЕБ-СЕРВЕРА ДЛЯ RENDER =====
+# ===== ЗАПУСК ВЕБ-СЕРВЕРА =====
 async def root(request):
     return web.Response(text="SelenaArtBot is alive! 🎨")
-
-async def ping(request):
-    return web.Response(text="OK")
 
 async def on_startup(app):
     global redis_client
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
     logger.info("✅ Redis connected")
-    
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"✅ Webhook set: {WEBHOOK_URL}")
@@ -429,15 +325,11 @@ async def on_shutdown(app):
 def create_app():
     app = web.Application()
     app.router.add_get("/", root)
-    app.router.add_get("/ping", ping)
     app.router.add_get("/health", root)
-    
     SimpleRequestHandler(dp, bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
-    
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
-    
     return app
 
 if __name__ == "__main__":
