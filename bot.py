@@ -546,6 +546,201 @@ async def edit_photo(message: types.Message):
     
     await process_edit(message, file_bytes, edit_prompt)
 
+# ===== АДМИН-КОМАНДЫ =====
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
+
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("🚫 Только для администратора")
+        return
+    
+    await message.answer(
+        "👑 *Админ-панель*\n\n"
+        "/stats — статистика\n"
+        "/users — список пользователей\n"
+        "/prem [id] [дни] — выдать премиум\n"
+        "/rmprem [id] — снять премиум\n"
+        "/broadcast [текст] — рассылка\n\n"
+        "🔧 *Пакеты:*\n"
+        "/add_gen [id] [кол-во] — добавить генерации\n"
+        "/add_edit [id] [кол-во] — добавить редактирования",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("stats"))
+async def admin_stats(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    # Собираем статистику
+    keys = await redis_client.keys("selena:gen:*")
+    users = set()
+    for key in keys:
+        parts = key.split(":")
+        if len(parts) >= 3:
+            users.add(parts[2])
+    
+    premium_keys = await redis_client.keys("selena:premium:*")
+    
+    total_gens = 0
+    for key in keys:
+        val = await redis_client.get(key)
+        if val:
+            total_gens += int(val)
+    
+    await message.answer(
+        f"📊 *Статистика бота*\n\n"
+        f"👥 Пользователей: {len(users)}\n"
+        f"⭐ Премиум: {len(premium_keys)}\n"
+        f"🎨 Всего генераций: {total_gens}\n"
+        f"💰 Баланс Stars: /stars",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("users"))
+async def admin_users(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    keys = await redis_client.keys("selena:pack:gen:*")
+    users_data = []
+    
+    for key in keys:
+        parts = key.split(":")
+        if len(parts) >= 4:
+            user_id = parts[3]
+            gens = await get_pack_generations(int(user_id))
+            edits = await get_pack_edits(int(user_id))
+            users_data.append(f"`{user_id}` — {gens} ген, {edits} ред")
+    
+    if not users_data:
+        await message.answer("Нет пользователей с пакетами")
+        return
+    
+    text = "👥 *Пользователи с пакетами:*\n\n" + "\n".join(users_data[:30])
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(Command("prem"))
+async def admin_premium(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("❌ Использование: /prem user_id [дни]")
+        return
+    
+    try:
+        user_id = int(parts[1])
+        days = int(parts[2]) if len(parts) > 2 else 30
+        await redis_client.setex(f"selena:premium:{user_id}", days * 86400, "1")
+        await message.answer(f"✅ Премиум выдан {user_id} на {days} дней")
+    except:
+        await message.answer("❌ Ошибка")
+
+@dp.message(Command("rmprem"))
+async def admin_rmpremium(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Использование: /rmprem user_id")
+        return
+    
+    try:
+        user_id = int(parts[1])
+        await redis_client.delete(f"selena:premium:{user_id}")
+        await message.answer(f"✅ Премиум снят с {user_id}")
+    except:
+        await message.answer("❌ Ошибка")
+
+@dp.message(Command("add_gen"))
+async def admin_add_gen(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("❌ Использование: /add_gen user_id количество")
+        return
+    
+    try:
+        user_id = int(parts[1])
+        count = int(parts[2])
+        await add_pack_generations(user_id, count)
+        await message.answer(f"✅ Добавлено {count} генераций пользователю {user_id}")
+    except:
+        await message.answer("❌ Ошибка")
+
+@dp.message(Command("add_edit"))
+async def admin_add_edit(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("❌ Использование: /add_edit user_id количество")
+        return
+    
+    try:
+        user_id = int(parts[1])
+        count = int(parts[2])
+        await add_pack_edits(user_id, count)
+        await message.answer(f"✅ Добавлено {count} редактирований пользователю {user_id}")
+    except:
+        await message.answer("❌ Ошибка")
+
+@dp.message(Command("broadcast"))
+async def admin_broadcast(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    text = message.text.replace("/broadcast", "").strip()
+    if not text:
+        await message.answer("❌ Укажите текст рассылки")
+        return
+    
+    # Собираем всех пользователей
+    keys = await redis_client.keys("selena:gen:*")
+    users = set()
+    for key in keys:
+        parts = key.split(":")
+        if len(parts) >= 3:
+            users.add(int(parts[2]))
+    
+    await message.answer(f"📨 Рассылка для {len(users)} пользователей...")
+    
+    sent = 0
+    for uid in users:
+        try:
+            await bot.send_message(uid, f"📢 *Анонс от SelenaArtBot*\n\n{text}", parse_mode="Markdown")
+            sent += 1
+            await asyncio.sleep(0.05)
+        except:
+            pass
+    
+    await message.answer(f"✅ Отправлено: {sent}")
+
+@dp.message(Command("stars"))
+async def admin_stars(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getStarBalance") as resp:
+                data = await resp.json()
+                if data.get("ok"):
+                    stars = data.get("result", {}).get("balance", 0)
+                    await message.answer(f"⭐ *Баланс Stars бота:* {stars}\n\n💎 1 Star ≈ 10 рублей", parse_mode="Markdown")
+                else:
+                    await message.answer("❌ Не удалось получить баланс")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        
 # ===== ЗАПУСК =====
 async def root(request):
     return web.Response(text="SelenaArtBot is alive! 🎨")
