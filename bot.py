@@ -176,26 +176,21 @@ def enhance_prompt(prompt: str, style: str = "realistic") -> str:
     }
     return f"{styles.get(style, styles['realistic'])}: {prompt}"
 
-# ================= КРАСИВЫЙ ВОДЯНОЙ ЗНАК (прозрачный, тень, жирный) =================
+# ================= КРАСИВЫЙ ВОДЯНОЙ ЗНАК =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
-    """Добавляет красивый водяной знак с тенью и прозрачностью"""
     image_bytes.seek(0)
     img = Image.open(image_bytes).convert("RGB")
     
-    # Создаём слой для водяного знака
     watermark = Image.new('RGBA', img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(watermark)
     
     watermark_text = "SelenaArtBot"
     font_size = max(16, int(img.width / 35))
     
-    # Пробуем загрузить жирный шрифт
     try:
         font_paths = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/System/Library/Fonts/Helvetica-Bold.ttc",
-            "C:\\Windows\\Fonts\\Arialbd.ttf"
         ]
         font = None
         for path in font_paths:
@@ -207,26 +202,19 @@ async def add_watermark(image_bytes: BytesIO) -> BytesIO:
     except:
         font = ImageFont.load_default()
     
-    # Получаем размер текста
     bbox = draw.textbbox((0, 0), watermark_text, font=font)
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
     
-    # Позиция: правый нижний угол
     x = img.width - text_width - 15
     y = img.height - text_height - 15
     
-    # Рисуем тень (смещение на 2px)
     draw.text((x + 2, y + 2), watermark_text, fill=(0, 0, 0, 100), font=font)
-    
-    # Рисуем основной текст (полупрозрачный белый)
     draw.text((x, y), watermark_text, fill=(255, 255, 255, 180), font=font)
     
-    # Накладываем водяной знак
     img = img.convert("RGBA")
     img = Image.alpha_composite(img, watermark)
     
-    # Конвертируем обратно в RGB
     result = Image.new('RGB', img.size, (255, 255, 255))
     result.paste(img, mask=img.split()[3])
     
@@ -245,16 +233,13 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= OPENAI/GPT-IMAGE-1.5 (С ПОВТОРОМ) =================
+# ================= OPENAI/GPT-IMAGE-1.5 =================
 async def generate_with_openai(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
-    """Генерация через OpenAI GPT-Image-1.5 с автоматическим повтором"""
-    
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # Улучшаем промпт
     enhanced_prompt = enhance_prompt(prompt)
     
     payload = {
@@ -275,7 +260,6 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
         logger.info(f"[OPENAI] 🖼 Редактирование: {prompt[:50]}")
     else:
         logger.info(f"[OPENAI] 🎨 Генерация: {prompt[:50]}")
-        logger.info(f"[OPENAI] Улучшенный промпт: {enhanced_prompt[:100]}...")
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -286,7 +270,6 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
                 if resp.status != 200:
                     logger.error(f"[OPENAI] Ошибка {resp.status}: {response_text[:200]}")
                     if retry:
-                        logger.info("[OPENAI] Повторная попытка...")
                         await asyncio.sleep(2)
                         return await generate_with_openai(prompt, reference_image, retry=False)
                     return None
@@ -316,16 +299,13 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
                         if isinstance(data_field, dict):
                             image_url = data_field.get("url")
                         elif isinstance(data_field, list) and len(data_field) > 0:
-                            image_url = data_field[0].get("url") if isinstance(data_field[0], dict) else None
+                            image_url = data_field[0] if isinstance(data_field[0], str) else data_field[0].get("url")
                         
                         if not image_url:
                             output = status_data.get("output", {})
                             images = output.get("images", [])
                             if images:
                                 image_url = images[0] if isinstance(images[0], str) else images[0].get("url")
-                        
-                        if not image_url:
-                            image_url = status_data.get("url")
                         
                         if image_url:
                             logger.info(f"[OPENAI] Скачиваю...")
@@ -337,8 +317,6 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
                         else:
                             logger.error(f"[OPENAI] URL не найден")
                             if retry:
-                                logger.info("[OPENAI] Повторная попытка...")
-                                await asyncio.sleep(2)
                                 return await generate_with_openai(prompt, reference_image, retry=False)
                             return None
                             
@@ -346,35 +324,49 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
                         error_msg = status_data.get("error", {}).get("message", "Unknown")
                         logger.error(f"[OPENAI] ❌ Ошибка: {error_msg}")
                         if retry:
-                            logger.info("[OPENAI] Повторная попытка...")
-                            await asyncio.sleep(2)
                             return await generate_with_openai(prompt, reference_image, retry=False)
                         return None
             
             logger.error("[OPENAI] ❌ Таймаут")
-            if retry:
-                logger.info("[OPENAI] Повторная попытка...")
-                await asyncio.sleep(2)
-                return await generate_with_openai(prompt, reference_image, retry=False)
             return None
             
         except Exception as e:
             logger.error(f"[OPENAI] Исключение: {e}")
             if retry:
-                logger.info("[OPENAI] Повторная попытка...")
-                await asyncio.sleep(2)
                 return await generate_with_openai(prompt, reference_image, retry=False)
             return None
 
 
-# ================= FALLBACK API =================
+# ================= generate_image и edit_image =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    """Генерация через OpenAI GPT-Image-1.5 с повтором"""
     result = await generate_with_openai(prompt)
     if result:
         return result
     logger.warning("[GEN] OpenAI не ответил, пробуем fallback")
     return await generate_image_fallback(prompt)
+
+
+async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
+    return await generate_with_openai(prompt, reference_image=image_bytes)
+
+
+async def generate_image_fallback(prompt: str) -> BytesIO | None:
+    import urllib.parse
+    encoded = urllib.parse.quote(prompt)
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=30) as resp:
+                if resp.status == 200:
+                    img_data = await resp.read()
+                    if len(img_data) > 5000:
+                        logger.info(f"[FALLBACK] ✅ Успех!")
+                        return BytesIO(img_data)
+        except Exception as e:
+            logger.error(f"[FALLBACK] Ошибка: {e}")
+    return None
+
 
 # ================= LUNA AD =================
 async def send_luna_ad(message: types.Message):
@@ -917,7 +909,7 @@ async def on_startup(app):
 
 async def on_shutdown(app):
     if redis_client:
-        await redis_client.aclose()  # Исправлено на aclose()
+        await redis_client.aclose()
     await bot.session.close()
 
 def create_app():
