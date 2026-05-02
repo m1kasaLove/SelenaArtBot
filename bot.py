@@ -233,8 +233,8 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= OPENAI/GPT-5.4-IMAGE-2 =================
-async def generate_with_openai(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
+# ================= GOOGLE/GEMINI-3.1-FLASH-IMAGE-PREVIEW =================
+async def generate_with_gemini(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
@@ -242,50 +242,51 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
     
     enhanced_prompt = enhance_prompt(prompt)
     
+    # Используем google/gemini-3.1-flash-image-preview
     payload = {
-        "model": "openai/gpt-5.4-image-2",
+        "model": "google/gemini-3.1-flash-image-preview",
         "input": {
             "prompt": enhanced_prompt,
-            "size": "1024x1024",
-            "quality": "high",
             "aspect_ratio": "1:1",
-            "n": 1
+            "image_resolution": "1K",  # 0.5K, 1K, 2K, 4K
+            "output_format": "png"
         },
         "async": True
     }
     
+    # Если есть референсное изображение (для редактирования)
     if reference_image:
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
-        payload["input"]["image"] = img_base64
-        logger.info(f"[OPENAI] 🖼 Редактирование: {prompt[:50]}")
+        payload["input"]["images"] = [img_base64]  # Gemini использует массив images
+        logger.info(f"[GEMINI] 🖼 Редактирование: {prompt[:50]}")
     else:
-        logger.info(f"[OPENAI] 🎨 Генерация: {prompt[:50]}")
+        logger.info(f"[GEMINI] 🎨 Генерация: {prompt[:50]}")
     
     async with aiohttp.ClientSession() as session:
         try:
-            logger.info("[OPENAI] Отправка запроса в Polza...")
+            logger.info("[GEMINI] Отправка запроса в Polza...")
             async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
                 response_text = await resp.text()
-                logger.info(f"[OPENAI] Статус: {resp.status}")
-                logger.info(f"[OPENAI] Ответ: {response_text[:500]}")
+                logger.info(f"[GEMINI] Статус: {resp.status}")
+                logger.info(f"[GEMINI] Ответ: {response_text[:500]}")
                 
                 if resp.status != 200:
-                    logger.error(f"[OPENAI] Ошибка {resp.status}: {response_text[:200]}")
+                    logger.error(f"[GEMINI] Ошибка {resp.status}: {response_text[:200]}")
                     if retry:
                         await asyncio.sleep(2)
-                        return await generate_with_openai(prompt, reference_image, retry=False)
+                        return await generate_with_gemini(prompt, reference_image, retry=False)
                     return None
                 
                 data = await resp.json()
                 task_id = data.get("id")
                 if not task_id:
-                    logger.error(f"[OPENAI] Нет ID задачи")
+                    logger.error(f"[GEMINI] Нет ID задачи")
                     return None
-                logger.info(f"[OPENAI] Task ID: {task_id}")
+                logger.info(f"[GEMINI] Task ID: {task_id}")
             
             for attempt in range(45):
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
                 
                 async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as resp:
                     if resp.status != 200:
@@ -293,7 +294,7 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
                     
                     status_data = await resp.json()
                     status = status_data.get("status")
-                    logger.info(f"[OPENAI] Попытка {attempt+1}, статус: {status}")
+                    logger.info(f"[GEMINI] Попытка {attempt+1}, статус: {status}")
                     
                     if status == "completed":
                         image_url = None
@@ -311,50 +312,53 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
                                 image_url = images[0] if isinstance(images[0], str) else images[0].get("url")
                         
                         if image_url:
-                            logger.info(f"[OPENAI] Скачиваю...")
+                            logger.info(f"[GEMINI] Скачиваю...")
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
-                                    logger.info(f"[OPENAI] ✅ Успех! Размер: {len(img_bytes)} байт")
+                                    logger.info(f"[GEMINI] ✅ Успех! Размер: {len(img_bytes)} байт")
                                     return BytesIO(img_bytes)
                         else:
-                            logger.error(f"[OPENAI] URL не найден")
+                            logger.error(f"[GEMINI] URL не найден")
                             if retry:
-                                return await generate_with_openai(prompt, reference_image, retry=False)
+                                return await generate_with_gemini(prompt, reference_image, retry=False)
                             return None
                             
                     elif status == "failed":
                         error_msg = status_data.get("error", {}).get("message", "Unknown")
-                        logger.error(f"[OPENAI] ❌ Ошибка: {error_msg}")
+                        logger.error(f"[GEMINI] ❌ Ошибка: {error_msg}")
                         if retry:
-                            return await generate_with_openai(prompt, reference_image, retry=False)
+                            return await generate_with_gemini(prompt, reference_image, retry=False)
                         return None
             
-            logger.error("[OPENAI] ❌ Таймаут")
+            logger.error("[GEMINI] ❌ Таймаут")
             return None
             
         except Exception as e:
-            logger.error(f"[OPENAI] Исключение: {e}")
+            logger.error(f"[GEMINI] Исключение: {e}")
             import traceback
             traceback.print_exc()
             if retry:
-                return await generate_with_openai(prompt, reference_image, retry=False)
+                return await generate_with_gemini(prompt, reference_image, retry=False)
             return None
 
 # ================= generate_image и edit_image =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    result = await generate_with_openai(prompt)
+    """Генерация через Google Gemini 3.1 Flash"""
+    result = await generate_with_gemini(prompt)
     if result:
         return result
-    logger.warning("[GEN] OpenAI не ответил, пробуем fallback")
+    logger.warning("[GEN] Gemini не ответил, пробуем fallback")
     return await generate_image_fallback(prompt)
 
 
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    return await generate_with_openai(prompt, reference_image=image_bytes)
+    """Редактирование через Google Gemini 3.1 Flash"""
+    return await generate_with_gemini(prompt, reference_image=image_bytes)
 
 
 async def generate_image_fallback(prompt: str) -> BytesIO | None:
+    """Бесплатная генерация через Pollinations.ai (резерв)"""
     import urllib.parse
     encoded = urllib.parse.quote(prompt)
     url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
@@ -415,7 +419,7 @@ async def cmd_start(message: types.Message):
     
     menu = (
         f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
-        f"🤖 Модель: GPT-5.4-Image-2\n\n"
+        f"🤖 Модель: Google Gemini 3.1 Flash\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
         f"🔥 Пригласи друга → +{REFERRAL_REWARD} генераций тебе и ему!\n\n"
         f"📝 Команды в меню слева от смайлика\n\n"
@@ -433,7 +437,7 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "📖 *Помощь*\n\n"
-        "🤖 *Модель:* GPT-5.4-Image-2\n\n"
+        "🤖 *Модель:* Google Gemini 3.1 Flash\n\n"
         "**Генерация:** напиши описание\n"
         "**Редактирование:** отправь фото + подпись\n\n"
         "**Команды в меню:**\n"
@@ -568,7 +572,7 @@ async def payment_success(message: SuccessfulPayment):
 
 # ================= PROCESS =================
 async def process_generation(message: types.Message, prompt: str):
-    status_msg = await message.answer(f"🎨 *Генерирую (GPT-5.4-Image-2):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🎨 *Генерирую (Gemini 3.1 Flash):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     img = await generate_image(prompt)
     
@@ -581,7 +585,7 @@ async def process_generation(message: types.Message, prompt: str):
             
             await message.answer_photo(
                 photo, 
-                caption=f"🎨 *{prompt[:100]}*\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
+                caption=f"🎨 *{prompt[:100]}*\n🤖 Google Gemini 3.1 Flash | SelenaArtBot",
                 parse_mode="Markdown",
                 reply_markup=get_share_keyboard(image_id)
             )
@@ -598,7 +602,7 @@ async def process_generation(message: types.Message, prompt: str):
         )
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую (GPT-5.4-Image-2):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🖼 *Редактирую (Gemini 3.1 Flash):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     edited = await edit_image(image_bytes, prompt)
     
@@ -610,7 +614,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
         
         await message.answer_photo(
             photo, 
-            caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
+            caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 Google Gemini 3.1 Flash | SelenaArtBot",
             parse_mode="Markdown",
             reply_markup=get_share_keyboard(image_id)
         )
