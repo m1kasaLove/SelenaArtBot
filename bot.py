@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
     LabeledPrice, PreCheckoutQuery, SuccessfulPayment, BufferedInputFile,
-    InlineKeyboardButton, InlineKeyboardMarkup
+    InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeDefault
 )
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
@@ -54,6 +54,24 @@ PREMIUM_DAYS = 30
 REFERRAL_REWARD = 3
 
 BOT_USERNAME = "SelenaArtBot"
+
+# ================= SET MENU COMMANDS =================
+async def set_commands():
+    """Устанавливает боковое меню с командами"""
+    commands = [
+        BotCommand(command="start", description="🎨 Главное меню"),
+        BotCommand(command="status", description="📊 Моя статистика"),
+        BotCommand(command="referral", description="🔥 Реферальная ссылка"),
+        BotCommand(command="pack_gen5", description="🎨 5 генераций (8⭐)"),
+        BotCommand(command="pack_gen10", description="🎨 10 генераций (15⭐)"),
+        BotCommand(command="pack_edit5", description="🖼 5 редактирований (8⭐)"),
+        BotCommand(command="pack_edit10", description="🖼 10 редактирований (15⭐)"),
+        BotCommand(command="combo5", description="🔥 3 ген + 2 ред (12⭐)"),
+        BotCommand(command="combo10", description="🔥 6 ген + 4 ред (20⭐)"),
+        BotCommand(command="premium_buy", description="🌟 Безлимит (30⭐)"),
+        BotCommand(command="help", description="❓ Помощь"),
+    ]
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 
 # ================= REDIS HELPERS =================
 async def get_generations_today(user_id: int) -> int:
@@ -218,21 +236,23 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= РАБОТА С POLZA.AI (ЕДИНАЯ ФУНКЦИЯ) =================
+# ================= РАБОТА С POLZA.AI (qwen/image-2) =================
 
 async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO | None:
     """
     Универсальная функция для Polza.ai
     - Без reference_image → генерация
     - С reference_image → редактирование
+    Модель: qwen/image-2
     """
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
     }
     
+    # Используем qwen/image-2 для всего
     payload = {
-        "model": "qwen/image",
+        "model": "qwen/image-2",
         "input": {
             "prompt": prompt,
             "aspect_ratio": "1:1",
@@ -246,8 +266,8 @@ async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO
     if reference_image:
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
-        payload["input"]["images"] = [img_base64]
-        payload["input"]["strength"] = 0.7
+        payload["input"]["image"] = img_base64  # ВАЖНО: image, а не images
+        payload["input"]["strength"] = 0.8      # Сила изменений
         logger.info(f"[POLZA] 🖼 Редактирование: {prompt[:50]}")
     else:
         logger.info(f"[POLZA] 🎨 Генерация: {prompt[:50]}")
@@ -265,7 +285,7 @@ async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO
                 logger.info(f"[POLZA] Task ID: {task_id}")
             
             # 2. Ожидаем результат
-            for attempt in range(40):
+            for attempt in range(45):
                 await asyncio.sleep(3)
                 
                 async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as resp:
@@ -273,7 +293,7 @@ async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO
                         continue
                     status_data = await resp.json()
                     status = status_data.get("status")
-                    logger.info(f"[POLZA] Попытка {attempt+1}/40, статус: {status}")
+                    logger.info(f"[POLZA] Попытка {attempt+1}/45, статус: {status}")
                     
                     if status == "completed":
                         # Получаем URL результата
@@ -367,7 +387,7 @@ async def cmd_start(message: types.Message):
         f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
         f"🔥 Пригласи друга → +{REFERRAL_REWARD} генераций тебе и ему!\n\n"
-        f"📝 Команды: /status | /help\n\n"
+        f"📝 Команды в меню слева от смайлика\n\n"
         f"🌙 @LunaIsLovelyLunaBot"
     )
     
@@ -384,17 +404,17 @@ async def cmd_help(message: types.Message):
         "📖 *Помощь*\n\n"
         "**Генерация:** напиши описание\n"
         "**Редактирование:** отправь фото + подпись\n\n"
-        "**Команды:**\n"
-        "/start — главное меню\n"
-        "/status — статистика\n"
-        "/referral — реферальная ссылка\n"
-        "/pack_gen5 — 5 ген (8⭐)\n"
-        "/pack_gen10 — 10 ген (15⭐)\n"
-        "/pack_edit5 — 5 ред (8⭐)\n"
-        "/pack_edit10 — 10 ред (15⭐)\n"
-        "/combo5 — 3 ген+2 ред (12⭐)\n"
-        "/combo10 — 6 ген+4 ред (20⭐)\n"
-        "/premium_buy — безлимит (30⭐)\n\n"
+        "**Команды в меню слева от смайлика:**\n"
+        "• /start — главное меню\n"
+        "• /status — статистика\n"
+        "• /referral — реферальная ссылка\n"
+        "• /pack_gen5 — 5 ген (8⭐)\n"
+        "• /pack_gen10 — 10 ген (15⭐)\n"
+        "• /pack_edit5 — 5 ред (8⭐)\n"
+        "• /pack_edit10 — 10 ред (15⭐)\n"
+        "• /combo5 — 3 ген+2 ред (12⭐)\n"
+        "• /combo10 — 6 ген+4 ред (20⭐)\n"
+        "• /premium_buy — безлимит (30⭐)\n\n"
         "🌙 @LunaIsLovelyLunaBot",
         parse_mode="Markdown"
     )
@@ -855,9 +875,11 @@ async def on_startup(app):
     global redis_client
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
     logger.info("✅ Redis connected")
+    await set_commands()  # Устанавливаем меню команд
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"✅ Webhook set: {WEBHOOK_URL}")
+    logger.info("✅ Menu commands set")
 
 async def on_shutdown(app):
     if redis_client:
