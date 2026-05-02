@@ -150,7 +150,7 @@ async def get_referral_count(user_id: int) -> int:
 async def increment_referral_count(user_id: int):
     await redis_client.incr(f"selena:ref:count:{user_id}")
 
-# ================= WATERMARK (КРАСИВЫЙ) =================
+# ================= WATERMARK =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
     """Добавляет красивый полупрозрачный водяной знак"""
     image_bytes.seek(0)
@@ -218,87 +218,106 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= УЛУЧШЕННАЯ ГЕНЕРАЦИЯ С ПОВТОРАМИ =================
+# ================= ГЕНЕРАЦИЯ С ЖЁСТКОЙ ПРОВЕРКОЙ =================
 async def generate_image(prompt: str) -> BytesIO | None:
     import urllib.parse
     encoded = urllib.parse.quote(prompt)
-
-    # Список надежных API (если один упадет, бот попробует другой)
+    
     apis = [
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024", # основной
-        f"https://image.pollinations.ai/prompt/{encoded}",                          # запасной
-        f"https://pollinations.ai/api/v1/generate?prompt={encoded}&width=1024&height=1024" # последний шанс
+        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024",
+        f"https://pollinations.ai/api/v1/generate?prompt={encoded}&width=1024&height=1024"
     ]
     
     async with aiohttp.ClientSession() as session:
         for i, url in enumerate(apis):
             try:
-                logger.info(f"[GEN] Попытка {i+1}...")
+                logger.info(f"[GEN] Попытка {i+1}/{len(apis)}")
                 async with session.get(url, timeout=30) as resp:
+                    logger.info(f"[GEN] HTTP статус: {resp.status}")
+                    
                     if resp.status == 200:
                         img_data = await resp.read()
-                        # Проверяем, что скачалось именно изображение (хотя бы 5 КБ)
-                        if len(img_data) > 5000: 
-                            logger.info(f"[GEN] ✅ Успех на попытке {i+1}!")
+                        logger.info(f"[GEN] Получено байт: {len(img_data)}")
+                        
+                        is_png = len(img_data) > 8 and img_data[:8] == b'\x89PNG\r\n\x1a\n'
+                        is_jpg = len(img_data) > 2 and img_data[:2] == b'\xff\xd8'
+                        is_valid_size = len(img_data) > 10000
+                        
+                        if (is_png or is_jpg) and is_valid_size:
+                            logger.info(f"[GEN] ✅ Успех! Формат: {'PNG' if is_png else 'JPEG'}")
                             return BytesIO(img_data)
                         else:
-                            logger.warning(f"[GEN] Файл слишком маленький ({len(img_data)} байт)")
+                            logger.warning(f"[GEN] Битая картинка! PNG:{is_png} JPG:{is_jpg} Размер:{len(img_data)}")
+                    else:
+                        logger.warning(f"[GEN] HTTP {resp.status}")
+                        
             except asyncio.TimeoutError:
-                logger.warning(f"[GEN] Таймаут на попытке {i+1}")
+                logger.warning(f"[GEN] Таймаут {i+1}")
             except Exception as e:
-                logger.warning(f"[GEN] Ошибка на попытке {i+1}: {e}")
+                logger.warning(f"[GEN] Ошибка: {e}")
             
-            await asyncio.sleep(1) # Небольшая пауза между попытками
-
-    logger.error("[GEN] ❌ Все API не ответили после всех попыток")
+            await asyncio.sleep(1)
+    
+    logger.error("[GEN] ❌ Все API не ответили")
     return None
 
 
-# ================= УЛУЧШЕННОЕ РЕДАКТИРОВАНИЕ С ПОВТОРАМИ =================
+# ================= РЕДАКТИРОВАНИЕ С ЖЁСТКОЙ ПРОВЕРКОЙ =================
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
     import urllib.parse
     image_bytes.seek(0)
     
-    # Сначала пробуем быстрые фильтры
-    edited_img = await apply_filters(image_bytes, prompt)
-    if edited_img:
-        return edited_img
-        
-    # Если фильтры не подошли — генерируем через API с повторами
+    filtered = await apply_filters(image_bytes, prompt)
+    if filtered:
+        return filtered
+    
     encoded = urllib.parse.quote(prompt)
     apis = [
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024",
-        f"https://image.pollinations.ai/prompt/{encoded}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true",
+        f"https://image.pollinations.ai/prompt/{encoded}"
     ]
     
     async with aiohttp.ClientSession() as session:
         for i, url in enumerate(apis):
             try:
-                logger.info(f"[EDIT] API попытка {i+1}...")
+                logger.info(f"[EDIT] API попытка {i+1}/{len(apis)}")
                 async with session.get(url, timeout=30) as resp:
+                    logger.info(f"[EDIT] HTTP статус: {resp.status}")
+                    
                     if resp.status == 200:
                         img_data = await resp.read()
-                        if len(img_data) > 5000:
-                            logger.info(f"[EDIT] ✅ Успех на попытке {i+1}!")
+                        logger.info(f"[EDIT] Получено байт: {len(img_data)}")
+                        
+                        is_png = len(img_data) > 8 and img_data[:8] == b'\x89PNG\r\n\x1a\n'
+                        is_jpg = len(img_data) > 2 and img_data[:2] == b'\xff\xd8'
+                        is_valid_size = len(img_data) > 10000
+                        
+                        if (is_png or is_jpg) and is_valid_size:
+                            logger.info(f"[EDIT] ✅ Успех!")
                             return BytesIO(img_data)
+                        else:
+                            logger.warning(f"[EDIT] Битая картинка!")
+                    else:
+                        logger.warning(f"[EDIT] HTTP {resp.status}")
+                        
             except asyncio.TimeoutError:
-                logger.warning(f"[EDIT] Таймаут на попытке {i+1}")
+                logger.warning(f"[EDIT] Таймаут {i+1}")
             except Exception as e:
-                logger.warning(f"[EDIT] Ошибка на попытке {i+1}: {e}")
-            await asyncio.sleep(1)
+                logger.warning(f"[EDIT] Ошибка: {e}")
             
-    logger.error("[EDIT] ❌ API не сработал, фильтры не подошли")
+            await asyncio.sleep(1)
+    
+    logger.error("[EDIT] ❌ Не удалось получить картинку")
     return None
 
 
-# ================= ФИЛЬТРЫ (ВЫНЕСЕНЫ В ОТДЕЛЬНУЮ ФУНКЦИЮ) =================
+# ================= ФИЛЬТРЫ =================
 async def apply_filters(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Применяет фильтры к изображению (черно-белый, сепия и т.д.)"""
     try:
         img = Image.open(image_bytes)
         prompt_lower = prompt.lower()
         
-        # Чёрно-белый
         if any(word in prompt_lower for word in ["черно-белый", "черно белый", "чёрно-белый", "чёрно белый", "b/w", "black and white", "grayscale", "серый"]):
             img = img.convert("L").convert("RGB")
             logger.info("[EDIT] Применён фильтр: чёрно-белый")
@@ -307,7 +326,6 @@ async def apply_filters(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
             output.seek(0)
             return output
         
-        # Сепия
         elif "сепия" in prompt_lower or "sepia" in prompt_lower:
             try:
                 import numpy as np
@@ -322,9 +340,8 @@ async def apply_filters(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
                 output.seek(0)
                 return output
             except ImportError:
-                logger.warning("numpy не установлен, фильтр сепии недоступен")
+                logger.warning("numpy не установлен")
         
-        # Другие фильтры
         elif "контраст" in prompt_lower or "contrast" in prompt_lower:
             enhancer = ImageEnhance.Contrast(img)
             img = enhancer.enhance(1.5)
@@ -344,7 +361,7 @@ async def apply_filters(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
             return output
             
     except Exception as e:
-        logger.warning(f"[FILTERS] Ошибка при применении фильтра: {e}")
+        logger.warning(f"[FILTERS] Ошибка: {e}")
         
     return None
 
@@ -415,9 +432,7 @@ async def cmd_help(message: types.Message):
         "• чёрно-белый\n"
         "• сепия\n"
         "• увеличить контраст\n"
-        "• сделать ярче\n"
-        "• размытие\n"
-        "• резкость\n\n"
+        "• сделать ярче\n\n"
         "**Команды:**\n"
         "/start — главное меню\n"
         "/status — статистика\n"
@@ -555,20 +570,31 @@ async def process_generation(message: types.Message, prompt: str):
     img = await generate_image(prompt)
     
     if img:
-        watermarked = await add_watermark(img)
-        photo = BufferedInputFile(watermarked.getvalue(), filename="selena.png")
-        image_id = str(uuid.uuid4())[:8]
-        await redis_client.setex(f"selena:share:{image_id}", 3600, prompt)
-        
-        await message.answer_photo(
-            photo, 
-            caption=f"🎨 *{prompt[:100]}*\n✨ SelenaArtBot",
-            parse_mode="Markdown",
-            reply_markup=get_share_keyboard(image_id)
-        )
-        await status_msg.delete()
+        try:
+            watermarked = await add_watermark(img)
+            photo = BufferedInputFile(watermarked.getvalue(), filename="selena.png")
+            image_id = str(uuid.uuid4())[:8]
+            await redis_client.setex(f"selena:share:{image_id}", 3600, prompt)
+            
+            await message.answer_photo(
+                photo, 
+                caption=f"🎨 *{prompt[:100]}*\n✨ SelenaArtBot",
+                parse_mode="Markdown",
+                reply_markup=get_share_keyboard(image_id)
+            )
+            await status_msg.delete()
+        except Exception as e:
+            logger.error(f"Ошибка при отправке: {e}")
+            await status_msg.edit_text("❌ *Ошибка при обработке картинки*\n\nПопробуй позже", parse_mode="Markdown")
     else:
-        await status_msg.edit_text("❌ *Ошибка генерации*\n\nПопробуй написать на английском", parse_mode="Markdown")
+        await status_msg.edit_text(
+            "❌ *Ошибка генерации*\n\n"
+            "Сервер временно недоступен. Попробуй:\n"
+            "• Написать на английском\n"
+            "• Повторить через минуту\n\n"
+            "🌙 @LunaIsLovelyLunaBot",
+            parse_mode="Markdown"
+        )
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
     status_msg = await message.answer(f"🖼 *Редактирую:* {prompt[:50]}...\n⏳ 10-20 секунд", parse_mode="Markdown")
