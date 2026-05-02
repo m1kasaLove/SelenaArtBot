@@ -248,7 +248,7 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
             "prompt": enhanced_prompt,
             "size": "1024x1024",
             "quality": "high",
-            "aspect_ratio": "1:1",  # ✅ ДОБАВЛЕНО!
+            "aspect_ratio": "1:1",
             "n": 1
         },
         "async": True
@@ -262,38 +262,84 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
     else:
         logger.info(f"[OPENAI] 🎨 Генерация: {prompt[:50]}")
     
-    # ... остальной код без изменений ...
-
-
-# ================= generate_image и edit_image =================
-async def generate_image(prompt: str) -> BytesIO | None:
-    result = await generate_with_openai(prompt)
-    if result:
-        return result
-    logger.warning("[GEN] OpenAI не ответил, пробуем fallback")
-    return await generate_image_fallback(prompt)
-
-
-async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    return await generate_with_openai(prompt, reference_image=image_bytes)
-
-
-async def generate_image_fallback(prompt: str) -> BytesIO | None:
-    import urllib.parse
-    encoded = urllib.parse.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
-    
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, timeout=30) as resp:
-                if resp.status == 200:
-                    img_data = await resp.read()
-                    if len(img_data) > 5000:
-                        logger.info(f"[FALLBACK] ✅ Успех!")
-                        return BytesIO(img_data)
+            logger.info("[OPENAI] Отправка запроса в Polza...")
+            async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
+                response_text = await resp.text()
+                logger.info(f"[OPENAI] Статус: {resp.status}")
+                logger.info(f"[OPENAI] Ответ: {response_text[:500]}")
+                
+                if resp.status != 200:
+                    logger.error(f"[OPENAI] Ошибка {resp.status}: {response_text[:200]}")
+                    if retry:
+                        await asyncio.sleep(2)
+                        return await generate_with_openai(prompt, reference_image, retry=False)
+                    return None
+                
+                data = await resp.json()
+                task_id = data.get("id")
+                if not task_id:
+                    logger.error(f"[OPENAI] Нет ID задачи")
+                    return None
+                logger.info(f"[OPENAI] Task ID: {task_id}")
+            
+            for attempt in range(45):
+                await asyncio.sleep(3)
+                
+                async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as resp:
+                    if resp.status != 200:
+                        continue
+                    
+                    status_data = await resp.json()
+                    status = status_data.get("status")
+                    logger.info(f"[OPENAI] Попытка {attempt+1}, статус: {status}")
+                    
+                    if status == "completed":
+                        image_url = None
+                        
+                        data_field = status_data.get("data", {})
+                        if isinstance(data_field, dict):
+                            image_url = data_field.get("url")
+                        elif isinstance(data_field, list) and len(data_field) > 0:
+                            image_url = data_field[0] if isinstance(data_field[0], str) else data_field[0].get("url")
+                        
+                        if not image_url:
+                            output = status_data.get("output", {})
+                            images = output.get("images", [])
+                            if images:
+                                image_url = images[0] if isinstance(images[0], str) else images[0].get("url")
+                        
+                        if image_url:
+                            logger.info(f"[OPENAI] Скачиваю...")
+                            async with session.get(image_url) as img_resp:
+                                if img_resp.status == 200:
+                                    img_bytes = await img_resp.read()
+                                    logger.info(f"[OPENAI] ✅ Успех! Размер: {len(img_bytes)} байт")
+                                    return BytesIO(img_bytes)
+                        else:
+                            logger.error(f"[OPENAI] URL не найден")
+                            if retry:
+                                return await generate_with_openai(prompt, reference_image, retry=False)
+                            return None
+                            
+                    elif status == "failed":
+                        error_msg = status_data.get("error", {}).get("message", "Unknown")
+                        logger.error(f"[OPENAI] ❌ Ошибка: {error_msg}")
+                        if retry:
+                            return await generate_with_openai(prompt, reference_image, retry=False)
+                        return None
+            
+            logger.error("[OPENAI] ❌ Таймаут")
+            return None
+            
         except Exception as e:
-            logger.error(f"[FALLBACK] Ошибка: {e}")
-    return None
+            logger.error(f"[OPENAI] Исключение: {e}")
+            import traceback
+            traceback.print_exc()
+            if retry:
+                return await generate_with_openai(prompt, reference_image, retry=False)
+            return None
 
 
 # ================= LUNA AD =================
