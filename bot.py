@@ -247,7 +247,7 @@ async def generate_with_openai(prompt: str, reference_image: BytesIO = None, ret
         "input": {
             "prompt": enhanced_prompt,
             "size": "1024x1024",
-            "quality": "standard",
+            "quality": "high",  # ✅ ИСПРАВЛЕНО: standard → high
             "n": 1
         },
         "async": True
