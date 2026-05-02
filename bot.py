@@ -13,7 +13,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
-    LabeledPrice, PreCheckoutQuery, BufferedInputFile,
+    LabeledPrice, PreCheckoutQuery, SuccessfulPayment, BufferedInputFile,
     InlineKeyboardButton, InlineKeyboardMarkup
 )
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
