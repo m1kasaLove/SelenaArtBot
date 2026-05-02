@@ -17,7 +17,7 @@ from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup
 )
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 import redis.asyncio as redis
 
@@ -150,8 +150,9 @@ async def get_referral_count(user_id: int) -> int:
 async def increment_referral_count(user_id: int):
     await redis_client.incr(f"selena:ref:count:{user_id}")
 
-# ================= WATERMARK =================
+# ================= WATERMARK (КРАСИВЫЙ) =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
+    """Добавляет красивый полупрозрачный водяной знак"""
     image_bytes.seek(0)
     img = Image.open(image_bytes)
     
@@ -162,12 +163,26 @@ async def add_watermark(image_bytes: BytesIO) -> BytesIO:
         rgb_img.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
         img = rgb_img
     
-    draw = ImageDraw.Draw(img)
+    watermark_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(watermark_layer)
+    
     watermark_text = "✨ SelenaArtBot"
-    font_size = max(20, int(img.width / 25))
+    font_size = max(14, int(img.width / 35))
     
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "C:\\Windows\\Fonts\\Arial.ttf"
+        ]
+        font = None
+        for path in font_paths:
+            if os.path.exists(path):
+                font = ImageFont.truetype(path, font_size)
+                break
+        if font is None:
+            font = ImageFont.load_default()
     except:
         font = ImageFont.load_default()
     
@@ -175,11 +190,18 @@ async def add_watermark(image_bytes: BytesIO) -> BytesIO:
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
     
-    x = img.width - text_width - 15
-    y = img.height - text_height - 15
+    x = img.width - text_width - 10
+    y = img.height - text_height - 10
     
-    draw.rectangle([x-5, y-3, x+text_width+5, y+text_height+5], fill=(0, 0, 0, 128))
-    draw.text((x, y), watermark_text, fill=(255, 255, 255), font=font)
+    padding = 5
+    draw.rectangle(
+        [x - padding, y - padding, x + text_width + padding, y + text_height + padding],
+        fill=(0, 0, 0, 40)
+    )
+    
+    draw.text((x, y), watermark_text, fill=(255, 255, 255, 180), font=font)
+    
+    img.paste(watermark_layer, (0, 0), watermark_layer)
     
     output = BytesIO()
     img.save(output, format="PNG")
@@ -196,14 +218,13 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= FALLBACK GENERATION (БЕЗ POLZA) =================
+# ================= GENERATION =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    """Генерация через бесплатные API (быстро, без Polza)"""
+    """Генерация через бесплатные API"""
     
     import urllib.parse
     encoded = urllib.parse.quote(prompt)
     
-    # Список бесплатных API (первый рабочий)
     apis = [
         f"https://image.pollinations.ai/prompt/{encoded}",
         f"https://pollinations.ai/api/v1/generate?prompt={encoded}&width=1024&height=1024",
@@ -217,7 +238,7 @@ async def generate_image(prompt: str) -> BytesIO | None:
                 async with session.get(url, timeout=25) as resp:
                     if resp.status == 200:
                         img_data = await resp.read()
-                        if len(img_data) > 10000:  # Проверка что это картинка
+                        if len(img_data) > 10000:
                             logger.info(f"[GEN] ✅ Успех! Размер: {len(img_data)} байт")
                             return BytesIO(img_data)
                         else:
@@ -230,15 +251,97 @@ async def generate_image(prompt: str) -> BytesIO | None:
     logger.error("[GEN] ❌ Все API не ответили")
     return None
 
-
-# ================= FALLBACK EDIT (ВРЕМЕННО) =================
+# ================= EDIT =================
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Временное решение: возвращаем оригинал с наложенным текстом"""
+    """Реальное редактирование через фильтры и генерацию"""
     
-    # Просто возвращаем оригинал (позже починим)
-    await asyncio.sleep(2)
+    import urllib.parse
     image_bytes.seek(0)
-    return image_bytes
+    
+    try:
+        img = Image.open(image_bytes)
+        prompt_lower = prompt.lower()
+        
+        # Чёрно-белый
+        if any(word in prompt_lower for word in ["черно-белый", "черно белый", "чёрно-белый", "чёрно белый", "b/w", "black and white", "grayscale", "серый"]):
+            img = img.convert("L")
+            img = img.convert("RGB")
+            logger.info("[EDIT] Применён эффект: чёрно-белый")
+            output = BytesIO()
+            img.save(output, format="PNG")
+            output.seek(0)
+            return output
+        
+        # Сепия
+        elif "сепия" in prompt_lower or "sepia" in prompt_lower:
+            import numpy as np
+            img_array = np.array(img)
+            sepia_filter = np.array([[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]])
+            img_array = np.dot(img_array[:,:,:3], sepia_filter.T)
+            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+            img = Image.fromarray(img_array)
+            logger.info("[EDIT] Применён эффект: сепия")
+            output = BytesIO()
+            img.save(output, format="PNG")
+            output.seek(0)
+            return output
+        
+        # Увеличение контраста
+        elif "контраст" in prompt_lower or "contrast" in prompt_lower:
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(1.5)
+            logger.info("[EDIT] Применён эффект: увеличение контраста")
+            output = BytesIO()
+            img.save(output, format="PNG")
+            output.seek(0)
+            return output
+        
+        # Яркость
+        elif "ярче" in prompt_lower or "bright" in prompt_lower:
+            enhancer = ImageEnhance.Brightness(img)
+            img = enhancer.enhance(1.3)
+            logger.info("[EDIT] Применён эффект: увеличение яркости")
+            output = BytesIO()
+            img.save(output, format="PNG")
+            output.seek(0)
+            return output
+        
+        # Размытие
+        elif "размытие" in prompt_lower or "blur" in prompt_lower:
+            img = img.filter(ImageFilter.BLUR)
+            logger.info("[EDIT] Применён эффект: размытие")
+            output = BytesIO()
+            img.save(output, format="PNG")
+            output.seek(0)
+            return output
+        
+        # Резкость
+        elif "резкость" in prompt_lower or "sharp" in prompt_lower:
+            img = img.filter(ImageFilter.SHARPEN)
+            logger.info("[EDIT] Применён эффект: резкость")
+            output = BytesIO()
+            img.save(output, format="PNG")
+            output.seek(0)
+            return output
+            
+    except Exception as e:
+        logger.warning(f"[EDIT] Filter error: {e}")
+    
+    # Если фильтры не подошли — генерируем новую картинку
+    async with aiohttp.ClientSession() as session:
+        try:
+            encoded = urllib.parse.quote(prompt)
+            url = f"https://image.pollinations.ai/prompt/{encoded}"
+            async with session.get(url, timeout=30) as resp:
+                if resp.status == 200:
+                    img_data = await resp.read()
+                    if len(img_data) > 10000:
+                        logger.info(f"[EDIT] Сгенерирована новая картинка: {prompt[:50]}")
+                        return BytesIO(img_data)
+        except Exception as e:
+            logger.error(f"[EDIT] Generation error: {e}")
+    
+    return None
 
 # ================= LUNA AD =================
 async def send_luna_ad(message: types.Message):
@@ -259,7 +362,6 @@ async def cmd_start(message: types.Message):
     pack_edit = await get_pack_edits(user_id)
     premium = await is_premium(user_id)
     
-    # Обработка реферальной ссылки
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("ref_"):
         referrer_code = args[1].replace("ref_", "")
@@ -304,6 +406,13 @@ async def cmd_help(message: types.Message):
         "📖 *Помощь*\n\n"
         "**Генерация:** напиши описание\n"
         "**Редактирование:** отправь фото + подпись\n\n"
+        "**Доступные эффекты:**\n"
+        "• чёрно-белый\n"
+        "• сепия\n"
+        "• увеличить контраст\n"
+        "• сделать ярче\n"
+        "• размытие\n"
+        "• резкость\n\n"
         "**Команды:**\n"
         "/start — главное меню\n"
         "/status — статистика\n"
@@ -464,15 +573,26 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
     if edited:
         watermarked = await add_watermark(edited)
         photo = BufferedInputFile(watermarked.getvalue(), filename="edited.png")
+        image_id = str(uuid.uuid4())[:8]
+        await redis_client.setex(f"selena:share:{image_id}", 3600, prompt)
         
         await message.answer_photo(
             photo, 
             caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n✨ SelenaArtBot",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=get_share_keyboard(image_id)
         )
         await status_msg.delete()
     else:
-        await status_msg.edit_text("❌ *Ошибка редактирования*\n\nПопробуй позже", parse_mode="Markdown")
+        await status_msg.edit_text(
+            "❌ *Ошибка редактирования*\n\n"
+            "Попробуй:\n"
+            "• `сделай чёрно-белым`\n"
+            "• `увеличь контраст`\n"
+            "• `сделай ярче`\n\n"
+            "🌙 @LunaIsLovelyLunaBot",
+            parse_mode="Markdown"
+        )
 
 # ================= TEXT HANDLER =================
 @dp.message(F.text & ~F.text.startswith('/'))
@@ -517,7 +637,6 @@ async def edit_photo(message: types.Message):
         await message.answer("❌ Напиши подробнее, что изменить (минимум 3 символа)")
         return
     
-    # Проверяем премиум
     premium = await is_premium(user_id)
     if premium:
         file = await bot.get_file(message.photo[-1].file_id)
@@ -527,7 +646,6 @@ async def edit_photo(message: types.Message):
         await process_edit(message, file_bytes, edit_prompt)
         return
     
-    # Проверяем пакеты
     pack = await get_pack_edits(user_id)
     if pack > 0:
         await use_pack_edit(user_id)
@@ -538,7 +656,6 @@ async def edit_photo(message: types.Message):
         await process_edit(message, file_bytes, edit_prompt)
         return
     
-    # Проверяем бесплатные
     today_used = await get_edits_today(user_id)
     if today_used >= FREE_EDITS_PER_DAY:
         await message.answer(f"📊 *Лимит редактирований исчерпан!*\n💰 /pack_edit5 — 5 ред за {PRICE_5_EDIT}⭐\n🌟 /premium_buy — безлимит", parse_mode="Markdown")
