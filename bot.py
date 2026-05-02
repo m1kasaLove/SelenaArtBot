@@ -57,7 +57,6 @@ BOT_USERNAME = "SelenaArtBot"
 
 # ================= SET MENU COMMANDS =================
 async def set_commands():
-    """Устанавливает боковое меню с командами"""
     commands = [
         BotCommand(command="start", description="🎨 Главное меню"),
         BotCommand(command="status", description="📊 Моя статистика"),
@@ -168,9 +167,9 @@ async def get_referral_count(user_id: int) -> int:
 async def increment_referral_count(user_id: int):
     await redis_client.incr(f"selena:ref:count:{user_id}")
 
-# ================= WATERMARK =================
+# ================= ВОДЯНОЙ ЗНАК (БЕЗ ЭМОДЗИ) =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
-    """Добавляет красивый полупрозрачный водяной знак"""
+    """Добавляет аккуратный водяной знак"""
     image_bytes.seek(0)
     img = Image.open(image_bytes)
     
@@ -181,26 +180,12 @@ async def add_watermark(image_bytes: BytesIO) -> BytesIO:
         rgb_img.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
         img = rgb_img
     
-    watermark_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(watermark_layer)
-    
-    watermark_text = "✨ SelenaArtBot"
-    font_size = max(14, int(img.width / 35))
+    draw = ImageDraw.Draw(img)
+    watermark_text = "SelenaArtBot"
+    font_size = max(12, int(img.width / 40))
     
     try:
-        font_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-            "C:\\Windows\\Fonts\\Arial.ttf"
-        ]
-        font = None
-        for path in font_paths:
-            if os.path.exists(path):
-                font = ImageFont.truetype(path, font_size)
-                break
-        if font is None:
-            font = ImageFont.load_default()
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
     except:
         font = ImageFont.load_default()
     
@@ -211,18 +196,11 @@ async def add_watermark(image_bytes: BytesIO) -> BytesIO:
     x = img.width - text_width - 10
     y = img.height - text_height - 10
     
-    padding = 5
-    draw.rectangle(
-        [x - padding, y - padding, x + text_width + padding, y + text_height + padding],
-        fill=(0, 0, 0, 40)
-    )
-    
-    draw.text((x, y), watermark_text, fill=(255, 255, 255, 180), font=font)
-    
-    img.paste(watermark_layer, (0, 0), watermark_layer)
+    draw.rectangle([x-4, y-2, x+text_width+4, y+text_height+2], fill=(0, 0, 0, 100))
+    draw.text((x, y), watermark_text, fill=(255, 255, 255, 200), font=font)
     
     output = BytesIO()
-    img.save(output, format="PNG")
+    img.save(output, format="PNG", quality=85)
     output.seek(0)
     return output
 
@@ -236,21 +214,35 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= РАБОТА С POLZA.AI (qwen/image-2) ИСПРАВЛЕНА =================
+# ================= FALLBACK API (БЕСПЛАТНЫЙ) =================
+async def generate_image_fallback(prompt: str) -> BytesIO | None:
+    """Бесплатная генерация через Pollinations.ai"""
+    import urllib.parse
+    encoded = urllib.parse.quote(prompt)
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=30) as resp:
+                if resp.status == 200:
+                    img_data = await resp.read()
+                    if len(img_data) > 5000:
+                        logger.info(f"[FALLBACK] ✅ Успех! Размер: {len(img_data)}")
+                        return BytesIO(img_data)
+        except Exception as e:
+            logger.error(f"[FALLBACK] Ошибка: {e}")
+    return None
 
+# ================= ПОЛНОСТЬЮ ПЕРЕПИСАННАЯ ФУНКЦИЯ POLZA =================
 async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO | None:
     """
-    Универсальная функция для Polza.ai
-    - Без reference_image → генерация
-    - С reference_image → редактирование
-    Модель: qwen/image-2
+    Универсальная функция для Polza.ai с полным логированием
     """
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # Используем qwen/image-2 для всего
     payload = {
         "model": "qwen/image-2",
         "input": {
@@ -262,12 +254,11 @@ async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO
         "async": True
     }
     
-    # Если есть референсное изображение (для редактирования)
     if reference_image:
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
         payload["input"]["image"] = img_base64
-        payload["input"]["strength"] = 0.8
+        payload["input"]["strength"] = 0.7
         logger.info(f"[POLZA] 🖼 Редактирование: {prompt[:50]}")
     else:
         logger.info(f"[POLZA] 🎨 Генерация: {prompt[:50]}")
@@ -275,14 +266,18 @@ async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
+                response_text = await resp.text()
+                logger.info(f"[POLZA] Статус ответа: {resp.status}")
+                logger.info(f"[POLZA] Тело ответа: {response_text[:500]}")
+                
                 if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"[POLZA] Ошибка {resp.status}: {error_text}")
+                    logger.error(f"[POLZA] Ошибка HTTP {resp.status}")
                     return None
+                
                 data = await resp.json()
                 task_id = data.get("id")
                 if not task_id:
-                    logger.error(f"[POLZA] Нет ID задачи: {data}")
+                    logger.error(f"[POLZA] Нет ID задачи")
                     return None
                 logger.info(f"[POLZA] Task ID: {task_id}")
             
@@ -290,71 +285,83 @@ async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO
                 await asyncio.sleep(3)
                 
                 async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as resp:
+                    status_text = await resp.text()
+                    logger.info(f"[POLZA] Попытка {attempt+1}, статус ответа: {resp.status}")
+                    
                     if resp.status != 200:
                         continue
+                    
                     status_data = await resp.json()
+                    logger.info(f"[POLZA] Полный ответ: {status_data}")
+                    
                     status = status_data.get("status")
-                    logger.info(f"[POLZA] Попытка {attempt+1}/45, статус: {status}")
                     
                     if status == "completed":
-                        # 🔥 ИСПРАВЛЕНО: обрабатываем разные форматы ответа
                         image_url = None
                         
-                        # Вариант 1: data может быть словарём
-                        if isinstance(status_data.get("data"), dict):
+                        # Способ 1: data.url
+                        if status_data.get("data") and isinstance(status_data["data"], dict):
                             image_url = status_data["data"].get("url")
+                            logger.info(f"[POLZA] Найден data.url: {image_url}")
                         
-                        # Вариант 2: data может быть списком (как в твоём случае)
-                        if not image_url and isinstance(status_data.get("data"), list):
+                        # Способ 2: data[0].url
+                        if not image_url and status_data.get("data") and isinstance(status_data["data"], list):
                             if len(status_data["data"]) > 0:
                                 image_url = status_data["data"][0].get("url")
+                                logger.info(f"[POLZA] Найден data[0].url: {image_url}")
                         
-                        # Вариант 3: output.images
+                        # Способ 3: output.images[0].url
                         if not image_url:
                             output = status_data.get("output", {})
                             images = output.get("images", [])
                             if images:
-                                image_url = images[0].get("url") if isinstance(images[0], dict) else images[0]
+                                image_url = images[0] if isinstance(images[0], str) else images[0].get("url")
+                                logger.info(f"[POLZA] Найден output.images: {image_url}")
                         
-                        # Вариант 4: прямой URL в поле url
-                        if not image_url:
-                            image_url = status_data.get("url")
+                        # Способ 4: прямой url
+                        if not image_url and status_data.get("url"):
+                            image_url = status_data["url"]
+                            logger.info(f"[POLZA] Найден прямой url: {image_url}")
                         
                         if image_url:
-                            logger.info(f"[POLZA] Скачиваю: {image_url[:50]}...")
+                            logger.info(f"[POLZA] Скачиваю: {image_url[:80]}...")
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
                                     logger.info(f"[POLZA] ✅ Успех! Размер: {len(img_bytes)} байт")
                                     return BytesIO(img_bytes)
+                                else:
+                                    logger.error(f"[POLZA] Ошибка скачивания: {img_resp.status}")
                         else:
-                            logger.error(f"[POLZA] Не могу найти URL в ответе: {status_data}")
+                            logger.error(f"[POLZA] Не найдено URL в ответе")
                             return None
                             
                     elif status == "failed":
-                        error_msg = status_data.get("error", {}).get("message", "Unknown error")
+                        error_msg = status_data.get("error", {}).get("message", "Unknown")
                         logger.error(f"[POLZA] ❌ Ошибка: {error_msg}")
                         return None
+                    else:
+                        logger.info(f"[POLZA] Статус: {status}, ожидаем...")
             
             logger.error("[POLZA] ❌ Таймаут")
             return None
             
         except Exception as e:
             logger.error(f"[POLZA] Исключение: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
-
-# ================= generate_image и edit_image (обёртки) =================
-
+# ================= generate_image и edit_image =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    """Генерация через Polza.ai"""
-    return await polza_request(prompt, reference_image=None)
-
+    result = await polza_request(prompt)
+    if result:
+        return result
+    logger.warning("[GEN] Polza не ответил, пробуем fallback")
+    return await generate_image_fallback(prompt)
 
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Редактирование через Polza.ai"""
     return await polza_request(prompt, reference_image=image_bytes)
-
 
 # ================= LUNA AD =================
 async def send_luna_ad(message: types.Message):
@@ -564,7 +571,7 @@ async def process_generation(message: types.Message, prompt: str):
             
             await message.answer_photo(
                 photo, 
-                caption=f"🎨 *{prompt[:100]}*\n✨ SelenaArtBot",
+                caption=f"🎨 *{prompt[:100]}*\nSelenaArtBot",
                 parse_mode="Markdown",
                 reply_markup=get_share_keyboard(image_id)
             )
@@ -595,7 +602,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
         
         await message.answer_photo(
             photo, 
-            caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n✨ SelenaArtBot",
+            caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\nSelenaArtBot",
             parse_mode="Markdown",
             reply_markup=get_share_keyboard(image_id)
         )
@@ -890,7 +897,7 @@ async def on_startup(app):
     global redis_client
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
     logger.info("✅ Redis connected")
-    await set_commands()  # Устанавливаем меню команд
+    await set_commands()
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"✅ Webhook set: {WEBHOOK_URL}")
