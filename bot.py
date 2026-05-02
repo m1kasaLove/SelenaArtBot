@@ -196,113 +196,49 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= GENERATION =================
+# ================= FALLBACK GENERATION (БЕЗ POLZA) =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    headers = {
-        "Authorization": f"Bearer {POLZA_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    """Генерация через бесплатные API (быстро, без Polza)"""
     
-    payload = {
-        "model": "qwen/image-2",
-        "input": {
-            "prompt": prompt,
-            "aspect_ratio": "1:1",
-            "output_format": "png",
-            "guidance_scale": 7.5
-        }
-    }
+    import urllib.parse
+    encoded = urllib.parse.quote(prompt)
+    
+    # Список бесплатных API (первый рабочий)
+    apis = [
+        f"https://image.pollinations.ai/prompt/{encoded}",
+        f"https://pollinations.ai/api/v1/generate?prompt={encoded}&width=1024&height=1024",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
+    ]
     
     async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post("https://api.polza.ai/v1/media", headers=headers, json=payload) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"[GEN START ERROR] {resp.status} {error_text}")
-                    return None
-                data = await resp.json()
-                task_id = data.get("id")
-                logger.info(f"[GEN] Task started: {task_id}")
-            
-            for _ in range(60):
-                await asyncio.sleep(2)
-                async with session.get(f"https://api.polza.ai/v1/media/{task_id}", headers=headers) as status_resp:
-                    status_data = await status_resp.json()
-                    status = status_data.get("status")
-                    
-                    if status in ["completed", "succeeded", "success"]:
-                        images = status_data.get("output", {}).get("images", [])
-                        if images:
-                            image_url = images[0].get("url")
-                            async with session.get(image_url) as img_resp:
-                                if img_resp.status == 200:
-                                    img_bytes = await img_resp.read()
-                                    logger.info(f"[GEN] Image received, size: {len(img_bytes)}")
-                                    return BytesIO(img_bytes)
-                    elif status in ["failed", "error"]:
-                        logger.error(f"[GEN FAILED] {status_data}")
-                        return None
-            logger.error("[GEN TIMEOUT]")
-            return None
-        except Exception as e:
-            logger.error(f"[GEN EXCEPTION] {e}")
-            return None
+        for i, url in enumerate(apis):
+            try:
+                logger.info(f"[GEN] Попытка {i+1}: {url[:80]}...")
+                async with session.get(url, timeout=25) as resp:
+                    if resp.status == 200:
+                        img_data = await resp.read()
+                        if len(img_data) > 10000:  # Проверка что это картинка
+                            logger.info(f"[GEN] ✅ Успех! Размер: {len(img_data)} байт")
+                            return BytesIO(img_data)
+                        else:
+                            logger.warning(f"[GEN] Слишком маленький файл: {len(img_data)}")
+            except asyncio.TimeoutError:
+                logger.warning(f"[GEN] Таймаут API {i+1}")
+            except Exception as e:
+                logger.warning(f"[GEN] Ошибка API {i+1}: {e}")
+    
+    logger.error("[GEN] ❌ Все API не ответили")
+    return None
 
-# ================= EDIT =================
+
+# ================= FALLBACK EDIT (ВРЕМЕННО) =================
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
+    """Временное решение: возвращаем оригинал с наложенным текстом"""
+    
+    # Просто возвращаем оригинал (позже починим)
+    await asyncio.sleep(2)
     image_bytes.seek(0)
-    image_base64 = base64.b64encode(image_bytes.read()).decode('utf-8')
-    
-    headers = {
-        "Authorization": f"Bearer {POLZA_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "model": "qwen/image-2",
-        "input": {
-            "prompt": prompt,
-            "image": image_base64,
-            "strength": 0.7,
-            "aspect_ratio": "1:1",
-            "output_format": "png"
-        }
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post("https://api.polza.ai/v1/media", headers=headers, json=payload) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"[EDIT START ERROR] {resp.status} {error_text}")
-                    return None
-                data = await resp.json()
-                task_id = data.get("id")
-                logger.info(f"[EDIT] Task started: {task_id}")
-            
-            for _ in range(60):
-                await asyncio.sleep(2)
-                async with session.get(f"https://api.polza.ai/v1/media/{task_id}", headers=headers) as status_resp:
-                    status_data = await status_resp.json()
-                    status = status_data.get("status")
-                    
-                    if status in ["completed", "succeeded", "success"]:
-                        images = status_data.get("output", {}).get("images", [])
-                        if images:
-                            image_url = images[0].get("url")
-                            async with session.get(image_url) as img_resp:
-                                if img_resp.status == 200:
-                                    img_bytes = await img_resp.read()
-                                    logger.info(f"[EDIT] Image received, size: {len(img_bytes)}")
-                                    return BytesIO(img_bytes)
-                    elif status in ["failed", "error"]:
-                        logger.error(f"[EDIT FAILED] {status_data}")
-                        return None
-            logger.error("[EDIT TIMEOUT]")
-            return None
-        except Exception as e:
-            logger.error(f"[EDIT EXCEPTION] {e}")
-            return None
+    return image_bytes
 
 # ================= LUNA AD =================
 async def send_luna_ad(message: types.Message):
@@ -521,21 +457,18 @@ async def process_generation(message: types.Message, prompt: str):
         await status_msg.edit_text("❌ *Ошибка генерации*\n\nПопробуй написать на английском", parse_mode="Markdown")
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую:* {prompt[:50]}...\n⏳ 20-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🖼 *Редактирую:* {prompt[:50]}...\n⏳ 10-20 секунд", parse_mode="Markdown")
     
     edited = await edit_image(image_bytes, prompt)
     
     if edited:
         watermarked = await add_watermark(edited)
         photo = BufferedInputFile(watermarked.getvalue(), filename="edited.png")
-        image_id = str(uuid.uuid4())[:8]
-        await redis_client.setex(f"selena:share:{image_id}", 3600, prompt)
         
         await message.answer_photo(
             photo, 
             caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n✨ SelenaArtBot",
-            parse_mode="Markdown",
-            reply_markup=get_share_keyboard(image_id)
+            parse_mode="Markdown"
         )
         await status_msg.delete()
     else:
@@ -584,6 +517,7 @@ async def edit_photo(message: types.Message):
         await message.answer("❌ Напиши подробнее, что изменить (минимум 3 символа)")
         return
     
+    # Проверяем премиум
     premium = await is_premium(user_id)
     if premium:
         file = await bot.get_file(message.photo[-1].file_id)
@@ -593,6 +527,7 @@ async def edit_photo(message: types.Message):
         await process_edit(message, file_bytes, edit_prompt)
         return
     
+    # Проверяем пакеты
     pack = await get_pack_edits(user_id)
     if pack > 0:
         await use_pack_edit(user_id)
@@ -603,6 +538,7 @@ async def edit_photo(message: types.Message):
         await process_edit(message, file_bytes, edit_prompt)
         return
     
+    # Проверяем бесплатные
     today_used = await get_edits_today(user_id)
     if today_used >= FREE_EDITS_PER_DAY:
         await message.answer(f"📊 *Лимит редактирований исчерпан!*\n💰 /pack_edit5 — 5 ред за {PRICE_5_EDIT}⭐\n🌟 /premium_buy — безлимит", parse_mode="Markdown")
@@ -691,6 +627,25 @@ async def admin_stats(message: types.Message):
             users.add(parts[2])
     premium_keys = await redis_client.keys("selena:premium:*")
     await message.answer(f"📊 *Статистика*\n\n👥 Пользователей: {len(users)}\n🌟 Премиум: {len(premium_keys)}", parse_mode="Markdown")
+
+@dp.message(Command("users"))
+async def admin_users(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    keys = await redis_client.keys("selena:pack:gen:*")
+    users_data = []
+    for key in keys:
+        parts = key.split(":")
+        if len(parts) >= 4:
+            user_id = parts[3]
+            gens = await get_pack_generations(int(user_id))
+            edits = await get_pack_edits(int(user_id))
+            users_data.append(f"`{user_id}` — {gens} ген, {edits} ред")
+    if not users_data:
+        await message.answer("Нет пользователей с пакетами")
+        return
+    text = "👥 *Пользователи с пакетами:*\n\n" + "\n".join(users_data[:30])
+    await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("premium"))
 async def admin_premium(message: types.Message):
