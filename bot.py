@@ -236,7 +236,7 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= РАБОТА С POLZA.AI (qwen/image-2) =================
+# ================= РАБОТА С POLZA.AI (qwen/image-2) ИСПРАВЛЕНА =================
 
 async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO | None:
     """
@@ -266,15 +266,14 @@ async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO
     if reference_image:
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
-        payload["input"]["image"] = img_base64  # ВАЖНО: image, а не images
-        payload["input"]["strength"] = 0.8      # Сила изменений
+        payload["input"]["image"] = img_base64
+        payload["input"]["strength"] = 0.8
         logger.info(f"[POLZA] 🖼 Редактирование: {prompt[:50]}")
     else:
         logger.info(f"[POLZA] 🎨 Генерация: {prompt[:50]}")
     
     async with aiohttp.ClientSession() as session:
         try:
-            # 1. Отправляем запрос
             async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -282,9 +281,11 @@ async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO
                     return None
                 data = await resp.json()
                 task_id = data.get("id")
+                if not task_id:
+                    logger.error(f"[POLZA] Нет ID задачи: {data}")
+                    return None
                 logger.info(f"[POLZA] Task ID: {task_id}")
             
-            # 2. Ожидаем результат
             for attempt in range(45):
                 await asyncio.sleep(3)
                 
@@ -296,24 +297,38 @@ async def polza_request(prompt: str, reference_image: BytesIO = None) -> BytesIO
                     logger.info(f"[POLZA] Попытка {attempt+1}/45, статус: {status}")
                     
                     if status == "completed":
-                        # Получаем URL результата
-                        output = status_data.get("data", {})
-                        image_url = output.get("url")
+                        # 🔥 ИСПРАВЛЕНО: обрабатываем разные форматы ответа
+                        image_url = None
                         
+                        # Вариант 1: data может быть словарём
+                        if isinstance(status_data.get("data"), dict):
+                            image_url = status_data["data"].get("url")
+                        
+                        # Вариант 2: data может быть списком (как в твоём случае)
+                        if not image_url and isinstance(status_data.get("data"), list):
+                            if len(status_data["data"]) > 0:
+                                image_url = status_data["data"][0].get("url")
+                        
+                        # Вариант 3: output.images
                         if not image_url:
-                            images = status_data.get("output", {}).get("images", [])
+                            output = status_data.get("output", {})
+                            images = output.get("images", [])
                             if images:
-                                image_url = images[0].get("url")
+                                image_url = images[0].get("url") if isinstance(images[0], dict) else images[0]
+                        
+                        # Вариант 4: прямой URL в поле url
+                        if not image_url:
+                            image_url = status_data.get("url")
                         
                         if image_url:
-                            logger.info(f"[POLZA] Скачиваю...")
+                            logger.info(f"[POLZA] Скачиваю: {image_url[:50]}...")
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
                                     logger.info(f"[POLZA] ✅ Успех! Размер: {len(img_bytes)} байт")
                                     return BytesIO(img_bytes)
                         else:
-                            logger.error(f"[POLZA] Нет URL в ответе")
+                            logger.error(f"[POLZA] Не могу найти URL в ответе: {status_data}")
                             return None
                             
                     elif status == "failed":
