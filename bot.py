@@ -3,22 +3,25 @@ import logging
 import os
 import aiohttp
 import base64
-from io import BytesIO
-from datetime import datetime
 import random
 import string
 import uuid
+from io import BytesIO
+from datetime import datetime
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment, BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    LabeledPrice, PreCheckoutQuery, BufferedInputFile,
+    InlineKeyboardButton, InlineKeyboardMarkup
+)
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from PIL import Image, ImageDraw, ImageFont
 
 import redis.asyncio as redis
 
-# ===== КОНФИГУРАЦИЯ =====
+# ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 POLZA_API_KEY = os.getenv("POLZA_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -36,29 +39,23 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 redis_client = None
 
-# ===== ЦЕНЫ =====
+# ================= PRICES =================
 FREE_GENERATIONS_PER_DAY = 2
 FREE_EDITS_PER_DAY = 1
 
-PRICE_1_GEN = 2
 PRICE_5_GEN = 8
 PRICE_10_GEN = 15
-
-PRICE_1_EDIT = 2
 PRICE_5_EDIT = 8
 PRICE_10_EDIT = 15
-
 PRICE_COMBO_5 = 12
 PRICE_COMBO_10 = 20
-
 PREMIUM_PRICE = 30
 PREMIUM_DAYS = 30
-
 REFERRAL_REWARD = 3
 
 BOT_USERNAME = "SelenaArtBot"
 
-# ===== ФУНКЦИИ REDIS =====
+# ================= REDIS HELPERS =================
 async def get_generations_today(user_id: int) -> int:
     day_key = int(datetime.now().timestamp() // 86400)
     key = f"selena:gen:{user_id}:{day_key}"
@@ -117,7 +114,7 @@ async def add_combo_pack(user_id: int, gens: int, edits: int):
     await add_pack_generations(user_id, gens)
     await add_pack_edits(user_id, edits)
 
-# ===== ПРЕМИУМ =====
+# ================= PREMIUM =================
 async def is_premium(user_id: int) -> bool:
     try:
         status = await redis_client.get(f"selena:premium:{user_id}")
@@ -131,7 +128,7 @@ async def set_premium(user_id: int, days: int = PREMIUM_DAYS):
 async def remove_premium(user_id: int):
     await redis_client.delete(f"selena:premium:{user_id}")
 
-# ===== РЕФЕРАЛЬНАЯ СИСТЕМА =====
+# ================= REFERRAL =================
 async def get_referral_code(user_id: int) -> str:
     code = await redis_client.get(f"selena:ref:code:{user_id}")
     if not code:
@@ -153,9 +150,8 @@ async def get_referral_count(user_id: int) -> int:
 async def increment_referral_count(user_id: int):
     await redis_client.incr(f"selena:ref:count:{user_id}")
 
-# ===== ВОДЯНОЙ ЗНАК =====
+# ================= WATERMARK =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
-    """Добавляет водяной знак SelenaArtBot на изображение"""
     image_bytes.seek(0)
     img = Image.open(image_bytes)
     
@@ -190,17 +186,17 @@ async def add_watermark(image_bytes: BytesIO) -> BytesIO:
     output.seek(0)
     return output
 
-# ===== КНОПКИ =====
+# ================= SHARE BUTTON =================
 def get_share_keyboard(image_id: str = None):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔥 Поделиться результатом", callback_data=f"share:{image_id}")] if image_id else [],
+        [InlineKeyboardButton(text="🔥 Поделиться результатом", callback_data="share")] if image_id else [],
         [InlineKeyboardButton(text="👥 Пригласить друга (+3 ген)", callback_data="referral_info")],
         [InlineKeyboardButton(text="📊 Мои рефералы", callback_data="my_referrals")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="close")]
     ])
     return keyboard
 
-# ===== ГЕНЕРАЦИЯ =====
+# ================= GENERATION =================
 async def generate_image(prompt: str) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
@@ -221,37 +217,38 @@ async def generate_image(prompt: str) -> BytesIO | None:
         try:
             async with session.post("https://api.polza.ai/v1/media", headers=headers, json=payload) as resp:
                 if resp.status != 200:
-                    logger.error(f"Polza error: {resp.status}")
+                    error_text = await resp.text()
+                    logger.error(f"[GEN START ERROR] {resp.status} {error_text}")
                     return None
                 data = await resp.json()
                 task_id = data.get("id")
-                logger.info(f"Task started: {task_id}")
+                logger.info(f"[GEN] Task started: {task_id}")
             
-            for attempt in range(40):
+            for _ in range(60):
                 await asyncio.sleep(2)
                 async with session.get(f"https://api.polza.ai/v1/media/{task_id}", headers=headers) as status_resp:
-                    if status_resp.status != 200:
-                        continue
                     status_data = await status_resp.json()
                     status = status_data.get("status")
                     
-                    if status == "completed":
+                    if status in ["completed", "succeeded", "success"]:
                         images = status_data.get("output", {}).get("images", [])
                         if images:
                             image_url = images[0].get("url")
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
-                                    logger.info(f"Image received, size: {len(img_bytes)} bytes")
+                                    logger.info(f"[GEN] Image received, size: {len(img_bytes)}")
                                     return BytesIO(img_bytes)
-                    elif status == "failed":
+                    elif status in ["failed", "error"]:
+                        logger.error(f"[GEN FAILED] {status_data}")
                         return None
+            logger.error("[GEN TIMEOUT]")
             return None
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"[GEN EXCEPTION] {e}")
             return None
 
-# ===== РЕДАКТИРОВАНИЕ (ИСПРАВЛЕНО) =====
+# ================= EDIT =================
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
     image_bytes.seek(0)
     image_base64 = base64.b64encode(image_bytes.read()).decode('utf-8')
@@ -276,37 +273,38 @@ async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
         try:
             async with session.post("https://api.polza.ai/v1/media", headers=headers, json=payload) as resp:
                 if resp.status != 200:
-                    logger.error(f"Edit start error: {resp.status}")
+                    error_text = await resp.text()
+                    logger.error(f"[EDIT START ERROR] {resp.status} {error_text}")
                     return None
                 data = await resp.json()
                 task_id = data.get("id")
-                logger.info(f"Edit task started: {task_id}")
+                logger.info(f"[EDIT] Task started: {task_id}")
             
-            for attempt in range(40):
+            for _ in range(60):
                 await asyncio.sleep(2)
                 async with session.get(f"https://api.polza.ai/v1/media/{task_id}", headers=headers) as status_resp:
-                    if status_resp.status != 200:
-                        continue
                     status_data = await status_resp.json()
                     status = status_data.get("status")
                     
-                    if status == "completed":
+                    if status in ["completed", "succeeded", "success"]:
                         images = status_data.get("output", {}).get("images", [])
                         if images:
                             image_url = images[0].get("url")
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
-                                    logger.info(f"Edited image received, size: {len(img_bytes)} bytes")
+                                    logger.info(f"[EDIT] Image received, size: {len(img_bytes)}")
                                     return BytesIO(img_bytes)
-                    elif status == "failed":
+                    elif status in ["failed", "error"]:
+                        logger.error(f"[EDIT FAILED] {status_data}")
                         return None
+            logger.error("[EDIT TIMEOUT]")
             return None
         except Exception as e:
-            logger.error(f"Edit error: {e}")
+            logger.error(f"[EDIT EXCEPTION] {e}")
             return None
 
-# ===== РЕКЛАМА LUNA =====
+# ================= LUNA AD =================
 async def send_luna_ad(message: types.Message):
     await message.answer(
         "🌙 *Хочешь живое общение?*\n\n"
@@ -317,7 +315,7 @@ async def send_luna_ad(message: types.Message):
         disable_web_page_preview=True
     )
 
-# ===== КОМАНДЫ =====
+# ================= COMMANDS =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -325,35 +323,42 @@ async def cmd_start(message: types.Message):
     pack_edit = await get_pack_edits(user_id)
     premium = await is_premium(user_id)
     
-    # Аргументы команды /start (для реферальной ссылки)
+    # Обработка реферальной ссылки
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("ref_"):
         referrer_code = args[1].replace("ref_", "")
-        # ... (логика обработки реферала, которая у вас уже есть) ...
-        pass # Оставьте здесь вашу существующую логику рефералов
+        keys = await redis_client.keys("selena:ref:code:*")
+        for key in keys:
+            code = await redis_client.get(key)
+            if code == referrer_code:
+                referrer_id = int(key.split(":")[-1])
+                if referrer_id != user_id and not await get_referred_by(user_id):
+                    await set_referred_by(user_id, referrer_id)
+                    await increment_referral_count(referrer_id)
+                    await add_pack_generations(user_id, REFERRAL_REWARD)
+                    try:
+                        await bot.send_message(referrer_id, f"🎉 По вашей ссылке пришёл новый пользователь! Вы получили +{REFERRAL_REWARD} генераций!", parse_mode="Markdown")
+                    except:
+                        pass
+                    await message.answer(f"🎉 Вы получили +{REFERRAL_REWARD} генераций за регистрацию по ссылке!", parse_mode="Markdown")
+                break
     
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
+    share_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 Пригласить друга (+3 ген)", callback_data="referral_info")]
+    ])
     
     menu = (
-        "🎨 *SelenaArtBot* — твой AI-художник!\n\n"
+        f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
-        f"🔥 Рефералка: пригласи друга → +{REFERRAL_REWARD} ген\n"
-        f"`{ref_link}`\n\n"  # <-- Ссылка помещена в обратные кавычки (`) для Markdown
-        "📝 Команды: /status | /help | /referral\n\n"
-        "🌙 @LunaIsLovelyLunaBot"
+        f"🔥 Пригласи друга → +{REFERRAL_REWARD} генераций тебе и ему!\n\n"
+        f"📝 Команды: /status | /help\n\n"
+        f"🌙 @LunaIsLovelyLunaBot"
     )
     
     if premium:
         menu = "🌟 *У тебя ПРЕМИУМ!* Безлимит!\n\n" + menu
     
-    # Добавлена обработка ошибки при отправке
-    try:
-        await message.answer(menu, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Ошибка Markdown: {e}")
-        # Отправляем сообщение без форматирования, если что-то пошло не так
-        await message.answer(menu.replace("`", ""), parse_mode=None)
-    
+    await message.answer(menu, parse_mode="Markdown", reply_markup=share_kb)
     await asyncio.sleep(3)
     await send_luna_ad(message)
 
@@ -400,8 +405,7 @@ async def cmd_status(message: types.Message):
         f"🎨 Бесплатных ген: {remaining_gen} из {FREE_GENERATIONS_PER_DAY}\n"
         f"🖼 Бесплатных ред: {remaining_edit} из {FREE_EDITS_PER_DAY}\n"
         f"📦 Куплено: {pack_gen} ген | {pack_edit} ред\n"
-        f"👥 Приглашено: {ref_count}\n\n"
-        f"💫 /referral — твоя ссылка",
+        f"👥 Приглашено: {ref_count}\n",
         parse_mode="Markdown"
     )
 
@@ -414,11 +418,10 @@ async def cmd_referral(message: types.Message):
     await message.answer(
         f"🔥 *Реферальная программа*\n\n"
         f"👥 Приглашено: {count}\n"
-        f"🎁 За каждого: +{REFERRAL_REWARD} ген\n\n"
-        f"🔗 `{ref_link}`",
+        f"🎁 За каждого: +{REFERRAL_REWARD} ген",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
         ])
     )
 
@@ -495,7 +498,7 @@ async def payment_success(message: SuccessfulPayment):
         await add_combo_pack(user_id, 6, 4)
         await message.answer("✅ *Куплено 6 ген + 4 ред!*", parse_mode="Markdown")
 
-# ===== ПРОЦЕССЫ =====
+# ================= PROCESS =================
 async def process_generation(message: types.Message, prompt: str):
     status_msg = await message.answer(f"🎨 *Генерирую:* {prompt[:50]}...\n⏳ 10-20 секунд", parse_mode="Markdown")
     
@@ -538,7 +541,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
     else:
         await status_msg.edit_text("❌ *Ошибка редактирования*\n\nПопробуй позже", parse_mode="Markdown")
 
-# ===== ГЕНЕРАЦИЯ ПО ТЕКСТУ =====
+# ================= TEXT HANDLER =================
 @dp.message(F.text & ~F.text.startswith('/'))
 async def generate_by_text(message: types.Message):
     user_id = message.from_user.id
@@ -567,7 +570,7 @@ async def generate_by_text(message: types.Message):
     await incr_generations_today(user_id)
     await process_generation(message, prompt)
 
-# ===== РЕДАКТИРОВАНИЕ ФОТО =====
+# ================= PHOTO HANDLER =================
 @dp.message(F.photo)
 async def edit_photo(message: types.Message):
     user_id = message.from_user.id
@@ -578,7 +581,7 @@ async def edit_photo(message: types.Message):
         return
     
     if len(edit_prompt) < 3:
-        await message.answer("❌ Напиши подробнее, что изменить")
+        await message.answer("❌ Напиши подробнее, что изменить (минимум 3 символа)")
         return
     
     premium = await is_premium(user_id)
@@ -612,16 +615,16 @@ async def edit_photo(message: types.Message):
     file_bytes.seek(0)
     await process_edit(message, file_bytes, edit_prompt)
 
-# ===== CALLBACK-ЗАПРОСЫ =====
+# ================= CALLBACKS =================
 @dp.callback_query(lambda c: c.data == "referral_info")
 async def referral_info(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
     await callback.message.edit_text(
-        f"🔥 *Как получить бонусы?*\n\n1. Отправь другу ссылку\n2. Друг переходит\n3. Оба получаете +{REFERRAL_REWARD} ген\n\n🔗 `{ref_link}`",
+        f"🔥 *Как получить бонусы?*\n\n1. Отправь другу ссылку\n2. Друг переходит\n3. Оба получаете +{REFERRAL_REWARD} ген\n\nНажми на кнопку ниже, чтобы поделиться!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot!")],
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
         ])
     )
@@ -642,6 +645,7 @@ async def my_referrals(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
+    await callback.message.delete()
     await cmd_start(callback.message)
     await callback.answer()
 
@@ -650,7 +654,11 @@ async def close_message(callback: types.CallbackQuery):
     await callback.message.delete()
     await callback.answer()
 
-# ===== АДМИН-КОМАНДЫ =====
+@dp.callback_query(lambda c: c.data == "share")
+async def share_image(callback: types.CallbackQuery):
+    await callback.answer("📤 Отправь этот результат другу!", show_alert=True)
+
+# ================= ADMIN COMMANDS =================
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
@@ -658,7 +666,18 @@ def is_admin(user_id: int) -> bool:
 async def admin_panel(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    await message.answer("👑 *Админ-панель*\n\n/stats — статистика\n/users — список\n/premium [id] [дни]\n/rmpremium [id]\n/add_gen [id] [кол-во]\n/add_edit [id] [кол-во]\n/broadcast\n/stars", parse_mode="Markdown")
+    await message.answer(
+        "👑 *Админ-панель*\n\n"
+        "/stats — статистика\n"
+        "/users — список пользователей\n"
+        "/premium [id] [дни] — выдать премиум\n"
+        "/rmpremium [id] — снять премиум\n"
+        "/add_gen [id] [кол-во] — добавить генерации\n"
+        "/add_edit [id] [кол-во] — добавить редактирования\n"
+        "/broadcast [текст] — рассылка\n"
+        "/stars — баланс Stars",
+        parse_mode="Markdown"
+    )
 
 @dp.message(Command("stats"))
 async def admin_stats(message: types.Message):
@@ -771,7 +790,7 @@ async def admin_stars(message: types.Message):
     except:
         pass
 
-# ===== ЗАПУСК =====
+# ================= STARTUP =================
 async def root(request):
     return web.Response(text="SelenaArtBot is alive! 🎨")
 
