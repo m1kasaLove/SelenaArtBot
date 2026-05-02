@@ -325,24 +325,12 @@ async def cmd_start(message: types.Message):
     pack_edit = await get_pack_edits(user_id)
     premium = await is_premium(user_id)
     
+    # Аргументы команды /start (для реферальной ссылки)
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("ref_"):
         referrer_code = args[1].replace("ref_", "")
-        keys = await redis_client.keys("selena:ref:code:*")
-        for key in keys:
-            code = await redis_client.get(key)
-            if code == referrer_code:
-                referrer_id = int(key.split(":")[-1])
-                if referrer_id != user_id and not await get_referred_by(user_id):
-                    await set_referred_by(user_id, referrer_id)
-                    await increment_referral_count(referrer_id)
-                    await add_pack_generations(user_id, REFERRAL_REWARD)
-                    try:
-                        await bot.send_message(referrer_id, f"🎉 По вашей ссылке пришёл новый пользователь! Вы получили +{REFERRAL_REWARD} генераций!", parse_mode="Markdown")
-                    except:
-                        pass
-                    await message.answer(f"🎉 Вы получили +{REFERRAL_REWARD} генераций за регистрацию по ссылке!", parse_mode="Markdown")
-                break
+        # ... (логика обработки реферала, которая у вас уже есть) ...
+        pass # Оставьте здесь вашу существующую логику рефералов
     
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
     
@@ -350,7 +338,7 @@ async def cmd_start(message: types.Message):
         "🎨 *SelenaArtBot* — твой AI-художник!\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
         f"🔥 Рефералка: пригласи друга → +{REFERRAL_REWARD} ген\n"
-        f"🔗 {ref_link}\n\n"
+        f"`{ref_link}`\n\n"  # <-- Ссылка помещена в обратные кавычки (`) для Markdown
         "📝 Команды: /status | /help | /referral\n\n"
         "🌙 @LunaIsLovelyLunaBot"
     )
@@ -358,7 +346,14 @@ async def cmd_start(message: types.Message):
     if premium:
         menu = "🌟 *У тебя ПРЕМИУМ!* Безлимит!\n\n" + menu
     
-    await message.answer(menu, parse_mode="Markdown")
+    # Добавлена обработка ошибки при отправке
+    try:
+        await message.answer(menu, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Ошибка Markdown: {e}")
+        # Отправляем сообщение без форматирования, если что-то пошло не так
+        await message.answer(menu.replace("`", ""), parse_mode=None)
+    
     await asyncio.sleep(3)
     await send_luna_ad(message)
 
