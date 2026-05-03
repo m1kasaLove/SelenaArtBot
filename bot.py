@@ -58,7 +58,7 @@ BOT_USERNAME = "SelenaArtBot"
 # ================= SET MENU COMMANDS =================
 async def set_commands():
     commands = [
-        BotCommand(command="start", description="🎨 Главное менú"),
+        BotCommand(command="start", description="🎨 Главное меню"),
         BotCommand(command="status", description="📊 Моя статистика"),
         BotCommand(command="referral", description="🔥 Реферальная ссылка"),
         BotCommand(command="pack_gen5", description="🎨 5 генераций (8⭐)"),
@@ -247,7 +247,7 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= FLUX.2-PRO (ЛУЧШАЯ МОДЕЛЬ) =================
+# ================= FLUX.2-PRO =================
 async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
@@ -261,6 +261,7 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": enhanced_prompt,
+            "resolution": "1K",
             "aspect_ratio": "1:1",
             "output_format": "png",
             "guidance_scale": 7.5
@@ -275,7 +276,6 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         payload["input"]["image"] = img_base64
         payload["input"]["strength"] = 0.65
         logger.info(f"[FLUX] 🖼 Редактирование: {prompt[:50]}")
-        logger.info(f"[FLUX] Специальный промпт для сохранения лиц")
     else:
         logger.info(f"[FLUX] 🎨 Генерация: {prompt[:50]}")
     
@@ -774,20 +774,28 @@ async def edit_photo(message: types.Message):
 async def referral_info(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
+    count = await get_referral_count(user_id)
     
     await callback.message.answer(
-        f"🔥 *Как получить бонусы?*\n\n"
-        f"1. Отправь другу ссылку\n"
-        f"2. Друг переходит и регистрируется\n"
-        f"3. Вы оба получаете +{REFERRAL_REWARD} генераций!\n\n"
-        f"🔗 Твоя ссылка:\n`{ref_link}`\n\n"
-        f"Твои рефералы: {await get_referral_count(user_id)}\n"
-        f"Получено бонусов: {await get_referral_count(user_id) * REFERRAL_REWARD} ген",
+        f"🔥 *Реферальная программа*\n\n"
+        f"👥 Приглашено друзей: {count}\n"
+        f"🎁 За каждого: +{REFERRAL_REWARD} ген\n"
+        f"🎉 Получено бонусов: {count * REFERRAL_REWARD} ген\n\n"
+        f"🔗 *Твоя реферальная ссылка:*\n"
+        f"`{ref_link}`\n\n"
+        f"📤 Отправь ссылку другу → он получает +{REFERRAL_REWARD} ген → ты тоже!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")],
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_start")]
         ])
     )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "back_to_start")
+async def back_to_start(callback: types.CallbackQuery):
+    await callback.message.delete()
+    await cmd_start(callback.message)
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "my_referrals")
@@ -799,11 +807,11 @@ async def my_referrals(callback: types.CallbackQuery):
         f"📊 *Мои рефералы*\n\n"
         f"👥 Приглашено друзей: {count}\n"
         f"🎁 Получено бонусов: {count * REFERRAL_REWARD} генераций\n\n"
-        f"🔥 Продолжай приглашать — бонусы безлимитны!\n"
-        f"Каждый новый друг → +{REFERRAL_REWARD} ген тебе и ему!",
+        f"🔥 Каждый новый друг → +{REFERRAL_REWARD} ген тебе и ему!\n"
+        f"Продолжай приглашать — бонусы безлимитны!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_start")]
         ])
     )
     await callback.answer()
