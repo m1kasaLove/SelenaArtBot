@@ -269,7 +269,7 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": enhanced_prompt,
-            "resolution": "720p",
+            "resolution": "1K",
             "aspect_ratio": "1:1",
             "output_format": "png",
             "guidance_scale": 7.5
@@ -492,24 +492,6 @@ async def cmd_help(message: types.Message):
         parse_mode="Markdown"
     )
 
-@dp.message(Command("referral"))
-async def cmd_referral(message: types.Message):
-    user_id = message.from_user.id
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
-    count = await get_referral_count(user_id)
-    
-    await message.answer(
-        f"🔥 *Реферальная программа*\n\n"
-        f"👥 Приглашено друзей: {count}\n"
-        f"🎁 За каждого: +{REFERRAL_REWARD} ген\n\n"
-        f"🔗 Твоя ссылка:\n`{ref_link}`\n\n"
-        f"Отправь ссылку другу → он получает +{REFERRAL_REWARD} ген → ты тоже!",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
-        ])
-    )
-
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     user_id = message.from_user.id
@@ -535,6 +517,24 @@ async def cmd_status(message: types.Message):
         f"👥 Приглашено друзей: {ref_count}\n"
         f"🎁 Получено бонусов: {ref_count * REFERRAL_REWARD} ген",
         parse_mode="Markdown"
+    )
+
+@dp.message(Command("referral"))
+async def cmd_referral(message: types.Message):
+    user_id = message.from_user.id
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
+    count = await get_referral_count(user_id)
+    
+    await message.answer(
+        f"🔥 *Реферальная программа*\n\n"
+        f"👥 Приглашено друзей: {count}\n"
+        f"🎁 За каждого: +{REFERRAL_REWARD} ген\n\n"
+        f"🔗 Твоя ссылка:\n`{ref_link}`\n\n"
+        f"Отправь ссылку другу → он получает +{REFERRAL_REWARD} ген → ты тоже!",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
+        ])
     )
 
 @dp.message(Command("premium_buy"))
