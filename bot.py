@@ -444,14 +444,14 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": enhanced_prompt,
-            "resolution": "1080p",
-            "aspect_ratio": "1:1",
-            "output_format": "png",
-            "guidance_scale": 7.5
+            "width": 1024,
+            "height": 1024,
+            "output_format": "png"
         },
         "async": True
     }
     
+    # ✅ ОБНОВЛЁННЫЙ БЛОК ДЛЯ РЕДАКТИРОВАНИЯ
     if reference_image:
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
@@ -484,7 +484,8 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
                 logger.info(f"[FLUX] Task ID: {task_id}")
             
             for attempt in range(60):
-                await asyncio.sleep(2)
+                # ✅ ОБНОВЛЁННАЯ ЗАДЕРЖКА
+                await asyncio.sleep(1.5 if attempt < 20 else 2.5)
                 
                 async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as resp:
                     if resp.status != 200:
@@ -497,8 +498,12 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
                     if status == "completed":
                         image_url = None
                         
-                        data_field = status_data.get("data", {})
-                        if isinstance(data_field, dict):
+                        # ✅ ОБНОВЛЁННЫЙ БЛОК ИЗВЛЕЧЕНИЯ URL
+                        data_field = status_data.get("data")
+                        
+                        if isinstance(data_field, str):
+                            image_url = data_field
+                        elif isinstance(data_field, dict):
                             image_url = data_field.get("url")
                         elif isinstance(data_field, list) and len(data_field) > 0:
                             image_url = data_field[0] if isinstance(data_field[0], str) else data_field[0].get("url")
