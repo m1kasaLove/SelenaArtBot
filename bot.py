@@ -58,7 +58,7 @@ BOT_USERNAME = "SelenaArtBot"
 # ================= SET MENU COMMANDS =================
 async def set_commands():
     commands = [
-        BotCommand(command="start", description="🎨 Главное меню"),
+        BotCommand(command="start", description="🎨 Главное менú"),
         BotCommand(command="status", description="📊 Моя статистика"),
         BotCommand(command="referral", description="🔥 Реферальная ссылка"),
         BotCommand(command="pack_gen5", description="🎨 5 генераций (8⭐)"),
@@ -168,13 +168,27 @@ async def increment_referral_count(user_id: int):
     await redis_client.incr(f"selena:ref:count:{user_id}")
 
 # ================= ENHANCE PROMPT =================
-def enhance_prompt(prompt: str, style: str = "realistic") -> str:
-    styles = {
-        "realistic": "ultra realistic, 4k, cinematic lighting, detailed, sharp focus, professional photography, high resolution",
-        "anime": "anime style, studio ghibli, vibrant colors, detailed illustration, manga art",
-        "art": "digital art, concept art, highly detailed, fantasy art, beautiful composition"
-    }
-    return f"{styles.get(style, styles['realistic'])}: {prompt}"
+def enhance_prompt(prompt: str, is_edit: bool = False) -> str:
+    """Улучшает промпт для генерации или редактирования"""
+    
+    # Базовая инструкция для сохранения личности (для редактирования)
+    if is_edit:
+        preservation = (
+            "CRITICAL: Keep the SAME people with IDENTICAL faces, body shapes, and poses. "
+            "DO NOT change who they are. DO NOT replace them with different people. "
+            "Change ONLY what is requested. Preserve the original identity completely. "
+        )
+    else:
+        preservation = ""
+    
+    # Стиль
+    style = "ultra realistic, 4k, cinematic lighting, detailed, sharp focus, professional photography, high resolution"
+    
+    # Финальный промпт
+    if is_edit:
+        return f"{preservation} {style}: {prompt}"
+    else:
+        return f"{style}: {prompt}"
 
 # ================= КРАСИВЫЙ ВОДЯНОЙ ЗНАК =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
@@ -233,17 +247,18 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= QWEN/IMAGE-2 (ЛУЧШАЯ МОДЕЛЬ ДЛЯ РЕДАКТИРОВАНИЯ) =================
-async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
+# ================= FLUX.2-PRO (ЛУЧШАЯ МОДЕЛЬ) =================
+async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    enhanced_prompt = enhance_prompt(prompt)
+    is_edit = reference_image is not None
+    enhanced_prompt = enhance_prompt(prompt, is_edit=is_edit)
     
     payload = {
-        "model": "qwen/image-2",
+        "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": enhanced_prompt,
             "aspect_ratio": "1:1",
@@ -258,33 +273,33 @@ async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
         payload["input"]["image"] = img_base64
-        payload["input"]["strength"] = 0.8
-        logger.info(f"[QWEN] 🖼 Редактирование: {prompt[:50]}")
-        logger.info(f"[QWEN] Сохраняем лицо, меняем одежду/фон")
+        payload["input"]["strength"] = 0.65
+        logger.info(f"[FLUX] 🖼 Редактирование: {prompt[:50]}")
+        logger.info(f"[FLUX] Специальный промпт для сохранения лиц")
     else:
-        logger.info(f"[QWEN] 🎨 Генерация: {prompt[:50]}")
+        logger.info(f"[FLUX] 🎨 Генерация: {prompt[:50]}")
     
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
         try:
-            logger.info("[QWEN] Отправка запроса в Polza...")
+            logger.info("[FLUX] Отправка запроса в Polza...")
             async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
                 response_text = await resp.text()
-                logger.info(f"[QWEN] Статус: {resp.status}")
-                logger.info(f"[QWEN] Ответ: {response_text[:500]}")
+                logger.info(f"[FLUX] Статус: {resp.status}")
+                logger.info(f"[FLUX] Ответ: {response_text[:500]}")
                 
                 if resp.status != 200:
-                    logger.error(f"[QWEN] Ошибка {resp.status}: {response_text[:200]}")
+                    logger.error(f"[FLUX] Ошибка {resp.status}: {response_text[:200]}")
                     if retry:
                         await asyncio.sleep(2)
-                        return await generate_with_qwen(prompt, reference_image, retry=False)
+                        return await generate_with_flux(prompt, reference_image, retry=False)
                     return None
                 
                 data = await resp.json()
                 task_id = data.get("id")
                 if not task_id:
-                    logger.error(f"[QWEN] Нет ID задачи")
+                    logger.error(f"[FLUX] Нет ID задачи")
                     return None
-                logger.info(f"[QWEN] Task ID: {task_id}")
+                logger.info(f"[FLUX] Task ID: {task_id}")
             
             for attempt in range(60):
                 await asyncio.sleep(2)
@@ -295,7 +310,7 @@ async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry
                     
                     status_data = await resp.json()
                     status = status_data.get("status")
-                    logger.info(f"[QWEN] Попытка {attempt+1}/60, статус: {status}")
+                    logger.info(f"[FLUX] Попытка {attempt+1}/60, статус: {status}")
                     
                     if status == "completed":
                         image_url = None
@@ -313,49 +328,49 @@ async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry
                                 image_url = images[0] if isinstance(images[0], str) else images[0].get("url")
                         
                         if image_url:
-                            logger.info(f"[QWEN] Скачиваю...")
+                            logger.info(f"[FLUX] Скачиваю...")
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
-                                    logger.info(f"[QWEN] ✅ Успех! Размер: {len(img_bytes)} байт")
+                                    logger.info(f"[FLUX] ✅ Успех! Размер: {len(img_bytes)} байт")
                                     return BytesIO(img_bytes)
                         else:
-                            logger.error(f"[QWEN] URL не найден")
+                            logger.error(f"[FLUX] URL не найден")
                             if retry:
-                                return await generate_with_qwen(prompt, reference_image, retry=False)
+                                return await generate_with_flux(prompt, reference_image, retry=False)
                             return None
                             
                     elif status == "failed":
                         error_msg = status_data.get("error", {}).get("message", "Unknown")
-                        logger.error(f"[QWEN] ❌ Ошибка: {error_msg}")
+                        logger.error(f"[FLUX] ❌ Ошибка: {error_msg}")
                         if retry:
-                            return await generate_with_qwen(prompt, reference_image, retry=False)
+                            return await generate_with_flux(prompt, reference_image, retry=False)
                         return None
             
-            logger.error("[QWEN] ❌ Таймаут")
+            logger.error("[FLUX] ❌ Таймаут")
             return None
             
         except Exception as e:
-            logger.error(f"[QWEN] Исключение: {e}")
+            logger.error(f"[FLUX] Исключение: {e}")
             import traceback
             traceback.print_exc()
             if retry:
-                return await generate_with_qwen(prompt, reference_image, retry=False)
+                return await generate_with_flux(prompt, reference_image, retry=False)
             return None
 
 # ================= generate_image и edit_image =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    """Генерация через Qwen/Image-2"""
-    result = await generate_with_qwen(prompt)
+    """Генерация через FLUX.2-Pro"""
+    result = await generate_with_flux(prompt)
     if result:
         return result
-    logger.warning("[GEN] Qwen не ответил, пробуем fallback")
+    logger.warning("[GEN] FLUX не ответил, пробуем fallback")
     return await generate_image_fallback(prompt)
 
 
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Редактирование через Qwen/Image-2 (сохраняет лицо)"""
-    return await generate_with_qwen(prompt, reference_image=image_bytes)
+    """Редактирование через FLUX.2-Pro (сохраняет лица)"""
+    return await generate_with_flux(prompt, reference_image=image_bytes)
 
 
 async def generate_image_fallback(prompt: str) -> BytesIO | None:
@@ -395,6 +410,7 @@ async def cmd_start(message: types.Message):
     pack_edit = await get_pack_edits(user_id)
     premium = await is_premium(user_id)
     
+    # Обработка реферальной ссылки
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("ref_"):
         referrer_code = args[1].replace("ref_", "")
@@ -407,11 +423,27 @@ async def cmd_start(message: types.Message):
                     await set_referred_by(user_id, referrer_id)
                     await increment_referral_count(referrer_id)
                     await add_pack_generations(user_id, REFERRAL_REWARD)
+                    
+                    # Уведомление пригласившему
                     try:
-                        await bot.send_message(referrer_id, f"🎉 Новый пользователь по вашей ссылке! Вы получили +{REFERRAL_REWARD} генераций!", parse_mode="Markdown")
+                        await bot.send_message(
+                            referrer_id, 
+                            f"🎉 *По вашей ссылке пришёл новый пользователь!*\n\n"
+                            f"👥 Приглашённый: {message.from_user.first_name}\n"
+                            f"🎁 Вы получили +{REFERRAL_REWARD} генераций!\n\n"
+                            f"Всего приглашено: {await get_referral_count(referrer_id)}",
+                            parse_mode="Markdown"
+                        )
                     except:
                         pass
-                    await message.answer(f"🎉 Вы получили +{REFERRAL_REWARD} генераций за регистрацию по ссылке!", parse_mode="Markdown")
+                    
+                    # Уведомление новому пользователю
+                    await message.answer(
+                        f"🎉 *Вы получили +{REFERRAL_REWARD} генераций за регистрацию по ссылке!*\n\n"
+                        f"🔥 Теперь у вас есть бонусные генерации.\n"
+                        f"Просто напишите что нарисовать!",
+                        parse_mode="Markdown"
+                    )
                 break
     
     share_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -420,11 +452,13 @@ async def cmd_start(message: types.Message):
     
     menu = (
         f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
-        f"🤖 Модель: Qwen Image 2.0 (лучшая для редактирования лиц)\n\n"
+        f"🤖 Модель: FLUX.2 Pro (лучшая для редактирования)\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
         f"🔥 Пригласи друга → +{REFERRAL_REWARD} генераций тебе и ему!\n\n"
-        f"💡 *Совет:* Для лучшего результата пиши детально. Например:\n"
-        f"«Сохрани лица и позы людей, измени одежду на пляжную»\n\n"
+        f"⚠️ *Важно для редактирования:*\n"
+        f"• Формулируйте запросы чётко\n"
+        f"• Указывайте: «сохрани лица и позы»\n"
+        f"• Результат зависит от качества фото\n\n"
         f"📝 Команды в меню слева от смайлика\n\n"
         f"🌙 @LunaIsLovelyLunaBot"
     )
@@ -440,7 +474,7 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "📖 *Помощь*\n\n"
-        "🤖 *Модель:* Qwen Image 2.0\n\n"
+        "🤖 *Модель:* FLUX.2 Pro\n\n"
         "✨ *Советы для лучшего редактирования:*\n"
         "• Пиши детально: «Сохрани лица и позы»\n"
         "• Указывай что именно нужно изменить\n"
@@ -460,6 +494,24 @@ async def cmd_help(message: types.Message):
         "• /premium_buy — безлимит (30⭐)\n\n"
         "🌙 @LunaIsLovelyLunaBot",
         parse_mode="Markdown"
+    )
+
+@dp.message(Command("referral"))
+async def cmd_referral(message: types.Message):
+    user_id = message.from_user.id
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
+    count = await get_referral_count(user_id)
+    
+    await message.answer(
+        f"🔥 *Реферальная программа*\n\n"
+        f"👥 Приглашено друзей: {count}\n"
+        f"🎁 За каждого: +{REFERRAL_REWARD} ген\n\n"
+        f"🔗 Твоя ссылка:\n`{ref_link}`\n\n"
+        f"Отправь ссылку другу → он получает +{REFERRAL_REWARD} ген → ты тоже!",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
+        ])
     )
 
 @dp.message(Command("status"))
@@ -484,24 +536,9 @@ async def cmd_status(message: types.Message):
         f"🎨 Бесплатных ген: {remaining_gen} из {FREE_GENERATIONS_PER_DAY}\n"
         f"🖼 Бесплатных ред: {remaining_edit} из {FREE_EDITS_PER_DAY}\n"
         f"📦 Куплено: {pack_gen} ген | {pack_edit} ред\n"
-        f"👥 Приглашено: {ref_count}\n",
+        f"👥 Приглашено друзей: {ref_count}\n"
+        f"🎁 Получено бонусов: {ref_count * REFERRAL_REWARD} ген",
         parse_mode="Markdown"
-    )
-
-@dp.message(Command("referral"))
-async def cmd_referral(message: types.Message):
-    user_id = message.from_user.id
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
-    count = await get_referral_count(user_id)
-    
-    await message.answer(
-        f"🔥 *Реферальная программа*\n\n"
-        f"👥 Приглашено: {count}\n"
-        f"🎁 За каждого: +{REFERRAL_REWARD} ген",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
-        ])
     )
 
 @dp.message(Command("premium_buy"))
@@ -579,7 +616,7 @@ async def payment_success(message: SuccessfulPayment):
 
 # ================= PROCESS =================
 async def process_generation(message: types.Message, prompt: str):
-    status_msg = await message.answer(f"🎨 *Генерирую (Qwen 2.0):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🎨 *Генерирую (FLUX.2 Pro):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     img = await generate_image(prompt)
     
@@ -590,13 +627,22 @@ async def process_generation(message: types.Message, prompt: str):
             image_id = str(uuid.uuid4())[:8]
             await redis_client.setex(f"selena:share:{image_id}", 3600, prompt)
             
-            await message.answer_photo(
-                photo, 
-                caption=f"🎨 *{prompt[:100]}*\n🤖 Qwen Image 2.0 | SelenaArtBot",
-                parse_mode="Markdown",
-                reply_markup=get_share_keyboard(image_id)
-            )
-            await status_msg.delete()
+            for attempt in range(3):
+                try:
+                    await message.answer_photo(
+                        photo, 
+                        caption=f"🎨 *{prompt[:100]}*\n🤖 FLUX.2 Pro | SelenaArtBot",
+                        parse_mode="Markdown",
+                        reply_markup=get_share_keyboard(image_id),
+                        timeout=60
+                    )
+                    await status_msg.delete()
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(f"Таймаут при отправке, попытка {attempt+1}/3")
+                    if attempt == 2:
+                        await status_msg.edit_text("❌ *Ошибка отправки фото*\n\nПопробуй позже", parse_mode="Markdown")
+                    await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"Ошибка при отправке: {e}")
             await status_msg.edit_text("❌ *Ошибка при обработке картинки*", parse_mode="Markdown")
@@ -609,30 +655,43 @@ async def process_generation(message: types.Message, prompt: str):
         )
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую (Qwen 2.0):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🖼 *Редактирую (FLUX.2 Pro):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     edited = await edit_image(image_bytes, prompt)
     
     if edited:
-        watermarked = await add_watermark(edited)
-        photo = BufferedInputFile(watermarked.getvalue(), filename="edited.png")
-        image_id = str(uuid.uuid4())[:8]
-        await redis_client.setex(f"selena:share:{image_id}", 3600, prompt)
-        
-        await message.answer_photo(
-            photo, 
-            caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 Qwen Image 2.0 | SelenaArtBot",
-            parse_mode="Markdown",
-            reply_markup=get_share_keyboard(image_id)
-        )
-        await status_msg.delete()
+        try:
+            watermarked = await add_watermark(edited)
+            photo = BufferedInputFile(watermarked.getvalue(), filename="edited.png")
+            image_id = str(uuid.uuid4())[:8]
+            await redis_client.setex(f"selena:share:{image_id}", 3600, prompt)
+            
+            for attempt in range(3):
+                try:
+                    await message.answer_photo(
+                        photo, 
+                        caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 FLUX.2 Pro | SelenaArtBot",
+                        parse_mode="Markdown",
+                        reply_markup=get_share_keyboard(image_id),
+                        timeout=60
+                    )
+                    await status_msg.delete()
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(f"Таймаут при отправке, попытка {attempt+1}/3")
+                    if attempt == 2:
+                        await status_msg.edit_text("❌ *Ошибка отправки фото*\n\nПопробуй позже", parse_mode="Markdown")
+                    await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке: {e}")
+            await status_msg.edit_text("❌ *Ошибка при обработке картинки*", parse_mode="Markdown")
     else:
         await status_msg.edit_text(
             "❌ *Ошибка редактирования*\n\n"
             "Попробуй:\n"
             "• `сделай чёрно-белым`\n"
-            "• `сделай ярче`\n"
-            "• Напиши детальнее: «Сохрани лица и позы»\n\n"
+            "• `увеличь контраст`\n"
+            "• Напиши детальнее: «сохрани лица и позы»\n\n"
             "🌙 @LunaIsLovelyLunaBot",
             parse_mode="Markdown"
         )
@@ -661,8 +720,7 @@ async def generate_by_text(message: types.Message):
     today_used = await get_generations_today(user_id)
     if today_used >= FREE_GENERATIONS_PER_DAY:
         await message.answer(f"📊 *Лимит исчерпан!*\n💰 /pack_gen5 — 5 ген за {PRICE_5_GEN}⭐\n🔥 /referral — пригласи друга, получи +3 ген", parse_mode="Markdown")
-        return
-    
+        return    
     await incr_generations_today(user_id)
     await process_generation(message, prompt)
 
@@ -716,12 +774,18 @@ async def edit_photo(message: types.Message):
 async def referral_info(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
-    await callback.message.edit_text(
-        f"🔥 *Как получить бонусы?*\n\n1. Отправь другу ссылку\n2. Друг переходит\n3. Оба получаете +{REFERRAL_REWARD} ген\n\nНажми на кнопку ниже, чтобы поделиться!",
+    
+    await callback.message.answer(
+        f"🔥 *Как получить бонусы?*\n\n"
+        f"1. Отправь другу ссылку\n"
+        f"2. Друг переходит и регистрируется\n"
+        f"3. Вы оба получаете +{REFERRAL_REWARD} генераций!\n\n"
+        f"🔗 Твоя ссылка:\n`{ref_link}`\n\n"
+        f"Твои рефералы: {await get_referral_count(user_id)}\n"
+        f"Получено бонусов: {await get_referral_count(user_id) * REFERRAL_REWARD} ген",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
         ])
     )
     await callback.answer()
@@ -730,8 +794,13 @@ async def referral_info(callback: types.CallbackQuery):
 async def my_referrals(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     count = await get_referral_count(user_id)
-    await callback.message.edit_text(
-        f"📊 *Мои рефералы*\n\n👥 Приглашено: {count}\n🎁 Получено бонусов: {count * REFERRAL_REWARD} ген",
+    
+    await callback.message.answer(
+        f"📊 *Мои рефералы*\n\n"
+        f"👥 Приглашено друзей: {count}\n"
+        f"🎁 Получено бонусов: {count * REFERRAL_REWARD} генераций\n\n"
+        f"🔥 Продолжай приглашать — бонусы безлимитны!\n"
+        f"Каждый новый друг → +{REFERRAL_REWARD} ген тебе и ему!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
