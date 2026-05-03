@@ -169,9 +169,6 @@ async def increment_referral_count(user_id: int):
 
 # ================= ENHANCE PROMPT =================
 def enhance_prompt(prompt: str, is_edit: bool = False) -> str:
-    """Улучшает промпт для генерации или редактирования"""
-    
-    # Базовая инструкция для сохранения личности (для редактирования)
     if is_edit:
         preservation = (
             "CRITICAL: Keep the SAME people with IDENTICAL faces, body shapes, and poses. "
@@ -181,16 +178,14 @@ def enhance_prompt(prompt: str, is_edit: bool = False) -> str:
     else:
         preservation = ""
     
-    # Стиль
     style = "ultra realistic, 4k, cinematic lighting, detailed, sharp focus, professional photography, high resolution"
     
-    # Финальный промпт
     if is_edit:
         return f"{preservation} {style}: {prompt}"
     else:
         return f"{style}: {prompt}"
 
-# ================= КРАСИВЫЙ ВОДЯНОЙ ЗНАК =================
+# ================= WATERMARK =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
     image_bytes.seek(0)
     img = Image.open(image_bytes).convert("RGB")
@@ -247,8 +242,8 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= FLUX.2-PRO =================
-async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
+# ================= QWEN/IMAGE-2 (СТАБИЛЬНАЯ) =================
+async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
@@ -258,10 +253,9 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
     enhanced_prompt = enhance_prompt(prompt, is_edit=is_edit)
     
     payload = {
-        "model": "black-forest-labs/flux.2-pro",
+        "model": "qwen/image-2",
         "input": {
             "prompt": enhanced_prompt,
-            "resolution": "1K",
             "aspect_ratio": "1:1",
             "output_format": "png",
             "guidance_scale": 7.5
@@ -269,37 +263,36 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "async": True
     }
     
-    # Если есть референсное изображение (для редактирования)
     if reference_image:
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
         payload["input"]["image"] = img_base64
-        payload["input"]["strength"] = 0.65
-        logger.info(f"[FLUX] 🖼 Редактирование: {prompt[:50]}")
+        payload["input"]["strength"] = 0.7
+        logger.info(f"[QWEN] 🖼 Редактирование: {prompt[:50]}")
     else:
-        logger.info(f"[FLUX] 🎨 Генерация: {prompt[:50]}")
+        logger.info(f"[QWEN] 🎨 Генерация: {prompt[:50]}")
     
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
         try:
-            logger.info("[FLUX] Отправка запроса в Polza...")
+            logger.info("[QWEN] Отправка запроса в Polza...")
             async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
                 response_text = await resp.text()
-                logger.info(f"[FLUX] Статус: {resp.status}")
-                logger.info(f"[FLUX] Ответ: {response_text[:500]}")
+                logger.info(f"[QWEN] Статус: {resp.status}")
+                logger.info(f"[QWEN] Ответ: {response_text[:500]}")
                 
                 if resp.status != 200:
-                    logger.error(f"[FLUX] Ошибка {resp.status}: {response_text[:200]}")
+                    logger.error(f"[QWEN] Ошибка {resp.status}: {response_text[:200]}")
                     if retry:
                         await asyncio.sleep(2)
-                        return await generate_with_flux(prompt, reference_image, retry=False)
+                        return await generate_with_qwen(prompt, reference_image, retry=False)
                     return None
                 
                 data = await resp.json()
                 task_id = data.get("id")
                 if not task_id:
-                    logger.error(f"[FLUX] Нет ID задачи")
+                    logger.error(f"[QWEN] Нет ID задачи")
                     return None
-                logger.info(f"[FLUX] Task ID: {task_id}")
+                logger.info(f"[QWEN] Task ID: {task_id}")
             
             for attempt in range(60):
                 await asyncio.sleep(2)
@@ -310,7 +303,7 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
                     
                     status_data = await resp.json()
                     status = status_data.get("status")
-                    logger.info(f"[FLUX] Попытка {attempt+1}/60, статус: {status}")
+                    logger.info(f"[QWEN] Попытка {attempt+1}/60, статус: {status}")
                     
                     if status == "completed":
                         image_url = None
@@ -328,53 +321,48 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
                                 image_url = images[0] if isinstance(images[0], str) else images[0].get("url")
                         
                         if image_url:
-                            logger.info(f"[FLUX] Скачиваю...")
+                            logger.info(f"[QWEN] Скачиваю...")
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
-                                    logger.info(f"[FLUX] ✅ Успех! Размер: {len(img_bytes)} байт")
+                                    logger.info(f"[QWEN] ✅ Успех! Размер: {len(img_bytes)} байт")
                                     return BytesIO(img_bytes)
                         else:
-                            logger.error(f"[FLUX] URL не найден")
+                            logger.error(f"[QWEN] URL не найден")
                             if retry:
-                                return await generate_with_flux(prompt, reference_image, retry=False)
+                                return await generate_with_qwen(prompt, reference_image, retry=False)
                             return None
                             
                     elif status == "failed":
                         error_msg = status_data.get("error", {}).get("message", "Unknown")
-                        logger.error(f"[FLUX] ❌ Ошибка: {error_msg}")
+                        logger.error(f"[QWEN] ❌ Ошибка: {error_msg}")
                         if retry:
-                            return await generate_with_flux(prompt, reference_image, retry=False)
+                            return await generate_with_qwen(prompt, reference_image, retry=False)
                         return None
             
-            logger.error("[FLUX] ❌ Таймаут")
+            logger.error("[QWEN] ❌ Таймаут")
             return None
             
         except Exception as e:
-            logger.error(f"[FLUX] Исключение: {e}")
+            logger.error(f"[QWEN] Исключение: {e}")
             import traceback
             traceback.print_exc()
             if retry:
-                return await generate_with_flux(prompt, reference_image, retry=False)
+                return await generate_with_qwen(prompt, reference_image, retry=False)
             return None
 
 # ================= generate_image и edit_image =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    """Генерация через FLUX.2-Pro"""
-    result = await generate_with_flux(prompt)
+    result = await generate_with_qwen(prompt)
     if result:
         return result
-    logger.warning("[GEN] FLUX не ответил, пробуем fallback")
+    logger.warning("[GEN] Qwen не ответил, пробуем fallback")
     return await generate_image_fallback(prompt)
 
-
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Редактирование через FLUX.2-Pro (сохраняет лица)"""
-    return await generate_with_flux(prompt, reference_image=image_bytes)
-
+    return await generate_with_qwen(prompt, reference_image=image_bytes)
 
 async def generate_image_fallback(prompt: str) -> BytesIO | None:
-    """Бесплатная генерация через Pollinations.ai (резерв)"""
     import urllib.parse
     encoded = urllib.parse.quote(prompt)
     url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
@@ -424,7 +412,6 @@ async def cmd_start(message: types.Message):
                     await increment_referral_count(referrer_id)
                     await add_pack_generations(user_id, REFERRAL_REWARD)
                     
-                    # Уведомление пригласившему
                     try:
                         await bot.send_message(
                             referrer_id, 
@@ -437,7 +424,6 @@ async def cmd_start(message: types.Message):
                     except:
                         pass
                     
-                    # Уведомление новому пользователю
                     await message.answer(
                         f"🎉 *Вы получили +{REFERRAL_REWARD} генераций за регистрацию по ссылке!*\n\n"
                         f"🔥 Теперь у вас есть бонусные генерации.\n"
@@ -452,13 +438,12 @@ async def cmd_start(message: types.Message):
     
     menu = (
         f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
-        f"🤖 Модель: FLUX.2 Pro (лучшая для редактирования)\n\n"
+        f"🤖 Модель: Qwen Image 2.0\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
         f"🔥 Пригласи друга → +{REFERRAL_REWARD} генераций тебе и ему!\n\n"
-        f"⚠️ *Важно для редактирования:*\n"
-        f"• Формулируйте запросы чётко\n"
-        f"• Указывайте: «сохрани лица и позы»\n"
-        f"• Результат зависит от качества фото\n\n"
+        f"⚠️ *Важно:*\n"
+        f"• Пишите чёткие запросы\n"
+        f"• Для редактирования: «сохрани лица и позы»\n\n"
         f"📝 Команды в меню слева от смайлика\n\n"
         f"🌙 @LunaIsLovelyLunaBot"
     )
@@ -474,7 +459,7 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "📖 *Помощь*\n\n"
-        "🤖 *Модель:* FLUX.2 Pro\n\n"
+        "🤖 *Модель:* Qwen Image 2.0\n\n"
         "✨ *Советы для лучшего редактирования:*\n"
         "• Пиши детально: «Сохрани лица и позы»\n"
         "• Указывай что именно нужно изменить\n"
@@ -616,7 +601,7 @@ async def payment_success(message: SuccessfulPayment):
 
 # ================= PROCESS =================
 async def process_generation(message: types.Message, prompt: str):
-    status_msg = await message.answer(f"🎨 *Генерирую (FLUX.2 Pro):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🎨 *Генерирую (Qwen 2.0):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     img = await generate_image(prompt)
     
@@ -631,7 +616,7 @@ async def process_generation(message: types.Message, prompt: str):
                 try:
                     await message.answer_photo(
                         photo, 
-                        caption=f"🎨 *{prompt[:100]}*\n🤖 FLUX.2 Pro | SelenaArtBot",
+                        caption=f"🎨 *{prompt[:100]}*\n🤖 Qwen Image 2.0 | SelenaArtBot",
                         parse_mode="Markdown",
                         reply_markup=get_share_keyboard(image_id),
                         timeout=60
@@ -655,7 +640,7 @@ async def process_generation(message: types.Message, prompt: str):
         )
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую (FLUX.2 Pro):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🖼 *Редактирую (Qwen 2.0):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     edited = await edit_image(image_bytes, prompt)
     
@@ -670,7 +655,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
                 try:
                     await message.answer_photo(
                         photo, 
-                        caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 FLUX.2 Pro | SelenaArtBot",
+                        caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 Qwen Image 2.0 | SelenaArtBot",
                         parse_mode="Markdown",
                         reply_markup=get_share_keyboard(image_id),
                         timeout=60
@@ -720,7 +705,8 @@ async def generate_by_text(message: types.Message):
     today_used = await get_generations_today(user_id)
     if today_used >= FREE_GENERATIONS_PER_DAY:
         await message.answer(f"📊 *Лимит исчерпан!*\n💰 /pack_gen5 — 5 ген за {PRICE_5_GEN}⭐\n🔥 /referral — пригласи друга, получи +3 ген", parse_mode="Markdown")
-        return    
+        return
+    
     await incr_generations_today(user_id)
     await process_generation(message, prompt)
 
@@ -776,6 +762,8 @@ async def referral_info(callback: types.CallbackQuery):
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
     count = await get_referral_count(user_id)
     
+    await callback.message.delete()
+    
     await callback.message.answer(
         f"🔥 *Реферальная программа*\n\n"
         f"👥 Приглашено друзей: {count}\n"
@@ -802,6 +790,8 @@ async def back_to_start(callback: types.CallbackQuery):
 async def my_referrals(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     count = await get_referral_count(user_id)
+    
+    await callback.message.delete()
     
     await callback.message.answer(
         f"📊 *Мои рефералы*\n\n"
