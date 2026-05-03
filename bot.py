@@ -269,7 +269,7 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": enhanced_prompt,
-            "resolution": "1080",
+            "resolution": "1080p",
             "aspect_ratio": "1:1",
             "output_format": "png",
             "guidance_scale": 7.5
