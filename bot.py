@@ -55,6 +55,15 @@ REFERRAL_REWARD = 3
 
 BOT_USERNAME = "SelenaArtBot"
 
+# ================= КОНСТАНТЫ АНТИФРОДА =================
+REFERRAL_PENDING = "pending"
+REFERRAL_ACTIVE = "active"
+REFERRAL_REWARDED = "rewarded"
+
+MAX_REFERRALS_PER_HOUR = 5
+MAX_REFERRALS_PER_DAY = 20
+MIN_TIME_BETWEEN_REFERRALS = 60
+
 # ================= SET MENU COMMANDS =================
 async def set_commands():
     commands = [
@@ -131,6 +140,22 @@ async def add_combo_pack(user_id: int, gens: int, edits: int):
     await add_pack_generations(user_id, gens)
     await add_pack_edits(user_id, edits)
 
+async def remove_pack_generations(user_id: int, count: int):
+    current = await get_pack_generations(user_id)
+    if current > 0:
+        new_count = max(0, current - count)
+        await redis_client.set(f"selena:pack:gen:{user_id}", new_count)
+        return new_count
+    return 0
+
+async def remove_pack_edits(user_id: int, count: int):
+    current = await get_pack_edits(user_id)
+    if current > 0:
+        new_count = max(0, current - count)
+        await redis_client.set(f"selena:pack:edit:{user_id}", new_count)
+        return new_count
+    return 0
+
 # ================= PREMIUM =================
 async def is_premium(user_id: int) -> bool:
     try:
@@ -166,6 +191,156 @@ async def get_referral_count(user_id: int) -> int:
 
 async def increment_referral_count(user_id: int):
     await redis_client.incr(f"selena:ref:count:{user_id}")
+
+async def decrement_referral_count(user_id: int, count: int = 1):
+    current = await get_referral_count(user_id)
+    new_count = max(0, current - count)
+    await redis_client.set(f"selena:ref:count:{user_id}", new_count)
+    return new_count
+
+# ================= СТАТУСЫ РЕФЕРАЛОВ =================
+async def get_referral_status(user_id: int, referrer_id: int = None) -> str:
+    if referrer_id:
+        key = f"selena:ref:status:{referrer_id}:{user_id}"
+    else:
+        keys = await redis_client.keys(f"selena:ref:status:*:{user_id}")
+        if not keys:
+            return None
+        key = keys[0]
+    return await redis_client.get(key)
+
+async def set_referral_status(user_id: int, referrer_id: int, status: str):
+    key = f"selena:ref:status:{referrer_id}:{user_id}"
+    await redis_client.setex(key, 86400 * 30, status)
+
+async def add_pending_referral(user_id: int, referrer_id: int) -> bool:
+    existing_status = await get_referral_status(user_id, referrer_id)
+    if existing_status:
+        return False
+    
+    await set_referral_status(user_id, referrer_id, REFERRAL_PENDING)
+    await set_referred_by(user_id, referrer_id)
+    await log_referral(referrer_id, user_id, "pending", "Ожидает активации")
+    return True
+
+async def activate_referral(user_id: int) -> bool:
+    referrer_id = await get_referred_by(user_id)
+    if not referrer_id:
+        return False
+    
+    status = await get_referral_status(user_id, referrer_id)
+    
+    if status in [REFERRAL_ACTIVE, REFERRAL_REWARDED]:
+        return False
+    
+    if status is None or status == REFERRAL_PENDING:
+        await set_referral_status(user_id, referrer_id, REFERRAL_ACTIVE)
+        await log_referral(referrer_id, user_id, "active", "Пользователь активен")
+        return True
+    
+    return False
+
+async def reward_referral(user_id: int, by_action: bool = True) -> bool:
+    referrer_id = await get_referred_by(user_id)
+    if not referrer_id:
+        return False
+    
+    status = await get_referral_status(user_id, referrer_id)
+    
+    if status == REFERRAL_REWARDED:
+        return False
+    
+    if by_action and status in [REFERRAL_ACTIVE, REFERRAL_PENDING]:
+        limits_ok, limit_msg = await check_referral_limits(referrer_id)
+        if not limits_ok:
+            await log_referral(referrer_id, user_id, "rejected", f"Лимиты: {limit_msg}")
+            return False
+        
+        last_reward = await redis_client.get(f"selena:ref:last_reward:{referrer_id}")
+        if last_reward:
+            time_diff = datetime.now().timestamp() - float(last_reward)
+            if time_diff < MIN_TIME_BETWEEN_REFERRALS:
+                await log_referral(referrer_id, user_id, "rejected", f"Слишком быстро: {time_diff:.0f} сек")
+                return False
+        
+        await add_pack_generations(referrer_id, REFERRAL_REWARD)
+        await increment_referral_limits(referrer_id)
+        await increment_referral_count(referrer_id)
+        await redis_client.setex(f"selena:ref:last_reward:{referrer_id}", 3600, datetime.now().timestamp())
+        await set_referral_status(user_id, referrer_id, REFERRAL_REWARDED)
+        await log_referral(referrer_id, user_id, "rewarded", f"Бонус +{REFERRAL_REWARD} ген")
+        
+        try:
+            total_refs = await get_referral_count(referrer_id)
+            await bot.send_message(
+                referrer_id,
+                f"🎉 *Получен бонус за реферала!*\n\n"
+                f"👥 Ваш друг завершил первое действие в боте\n"
+                f"🎁 Вы получили +{REFERRAL_REWARD} генераций!\n"
+                f"📊 Всего приглашено: {total_refs}",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+        
+        return True
+    
+    return False
+
+async def get_referral_stats(user_id: int) -> dict:
+    stats = {
+        "pending": 0,
+        "active": 0,
+        "rewarded": 0,
+        "total": 0
+    }
+    
+    keys = await redis_client.keys(f"selena:ref:status:{user_id}:*")
+    for key in keys:
+        status = await redis_client.get(key)
+        if status in stats:
+            stats[status] += 1
+            stats["total"] += 1
+    
+    return stats
+
+# ================= ПРОВЕРКА ЛИМИТОВ =================
+async def check_referral_limits(referrer_id: int) -> tuple[bool, str]:
+    day_key = datetime.now().strftime("%Y-%m-%d")
+    hour_key = datetime.now().strftime("%Y-%m-%d-%H")
+    
+    daily_count = await redis_client.get(f"selena:ref:rewarded:daily:{referrer_id}:{day_key}")
+    daily_count = int(daily_count) if daily_count else 0
+    if daily_count >= MAX_REFERRALS_PER_DAY:
+        return False, f"Дневной лимит ({MAX_REFERRALS_PER_DAY})"
+    
+    hourly_count = await redis_client.get(f"selena:ref:rewarded:hourly:{referrer_id}:{hour_key}")
+    hourly_count = int(hourly_count) if hourly_count else 0
+    if hourly_count >= MAX_REFERRALS_PER_HOUR:
+        return False, f"Часовой лимит ({MAX_REFERRALS_PER_HOUR})"
+    
+    return True, "OK"
+
+async def increment_referral_limits(referrer_id: int):
+    day_key = datetime.now().strftime("%Y-%m-%d")
+    hour_key = datetime.now().strftime("%Y-%m-%d-%H")
+    
+    await redis_client.incr(f"selena:ref:rewarded:daily:{referrer_id}:{day_key}")
+    await redis_client.incr(f"selena:ref:rewarded:hourly:{referrer_id}:{hour_key}")
+    await redis_client.expire(f"selena:ref:rewarded:daily:{referrer_id}:{day_key}", 86400)
+    await redis_client.expire(f"selena:ref:rewarded:hourly:{referrer_id}:{hour_key}", 3600)
+
+# ================= ЛОГИРОВАНИЕ =================
+async def log_referral(referrer_id: int, new_user_id: int, status: str, reason: str = ""):
+    log_key = f"selena:ref:log:{referrer_id}"
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "new_user_id": new_user_id,
+        "status": status,
+        "reason": reason
+    }
+    await redis_client.lpush(log_key, str(log_entry))
+    await redis_client.ltrim(log_key, 0, 99)
 
 # ================= ENHANCE PROMPT =================
 def enhance_prompt(prompt: str, is_edit: bool = False) -> str:
@@ -420,41 +595,45 @@ async def cmd_start(message: types.Message):
             code = await redis_client.get(key)
             if code == referrer_code:
                 referrer_id = int(key.split(":")[-1])
-                if referrer_id != user_id and not await get_referred_by(user_id):
-                    await set_referred_by(user_id, referrer_id)
-                    await increment_referral_count(referrer_id)
-                    await add_pack_generations(user_id, REFERRAL_REWARD)
-                    
-                    try:
-                        await bot.send_message(
-                            referrer_id, 
-                            f"🎉 *По вашей ссылке пришёл новый пользователь!*\n\n"
-                            f"👥 Приглашённый: {message.from_user.first_name}\n"
-                            f"🎁 Вы получили +{REFERRAL_REWARD} генераций!\n\n"
-                            f"Всего приглашено: {await get_referral_count(referrer_id)}",
-                            parse_mode="Markdown"
-                        )
-                    except:
-                        pass
-                    
-                    await message.answer(
-                        f"🎉 *Вы получили +{REFERRAL_REWARD} генераций за регистрацию по ссылке!*\n\n"
-                        f"🔥 Теперь у вас есть бонусные генерации.\n"
-                        f"Просто напишите что нарисовать!",
-                        parse_mode="Markdown"
-                    )
+                
+                if referrer_id == user_id:
+                    await log_referral(referrer_id, user_id, "rejected", "Самореферал")
+                    break
+                
+                existing_referrer = await get_referred_by(user_id)
+                if existing_referrer:
+                    await log_referral(referrer_id, user_id, "rejected", "Уже имеет реферала")
+                    break
+                
+                await add_pending_referral(user_id, referrer_id)
+                
+                await message.answer(
+                    f"🎉 *Вы зарегистрировались по реферальной ссылке!*\n\n"
+                    f"🔥 Чтобы активировать бонус, просто начните пользоваться ботом:\n"
+                    f"• Сгенерируйте картинку\n"
+                    f"• Или отредактируйте фото\n\n"
+                    f"После первого действия бонус будет начислен вам и вашему другу!\n\n"
+                    f"💰 Бонус: +{REFERRAL_REWARD} генераций",
+                    parse_mode="Markdown"
+                )
                 break
     
-    share_kb = get_share_keyboard()
+    ref_stats = await get_referral_stats(user_id)
+    
+    share_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 Пригласить друга (+3 gen)", callback_data="referral_info")],
+        [InlineKeyboardButton(text="📊 Мои рефералы", callback_data="my_referrals")]
+    ])
     
     menu = (
         f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
         f"🤖 Модель: FLUX.2 Pro\n\n"
-        f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
-        f"🔥 Пригласи друга → +{REFERRAL_REWARD} генераций тебе и ему!\n\n"
-        f"⚠️ *Важно для редактирования:*\n"
-        f"• Пишите чёткие запросы\n"
-        f"• Указывайте: «сохрани лица и позы»\n\n"
+        f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n\n"
+        f"🔥 *Реферальная система:*\n"
+        f"• В ожидании: {ref_stats['pending']}\n"
+        f"• Активных: {ref_stats['active']}\n"
+        f"• Награждено: {ref_stats['rewarded']}\n\n"
+        f"Пригласи друга → +{REFERRAL_REWARD} ген за активного пользователя!\n\n"
         f"📝 Команды в меню слева от смайлика\n\n"
         f"🌙 @LunaIsLovelyLunaBot"
     )
@@ -492,6 +671,25 @@ async def cmd_help(message: types.Message):
         parse_mode="Markdown"
     )
 
+@dp.message(Command("referral"))
+async def cmd_referral(message: types.Message):
+    user_id = message.from_user.id
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
+    count = await get_referral_count(user_id)
+    
+    await message.answer(
+        f"🔥 *Реферальная программа*\n\n"
+        f"👥 Приглашено друзей: {count}\n"
+        f"🎁 За каждого: +{REFERRAL_REWARD} ген\n\n"
+        f"🔗 Твоя ссылка:\n`{ref_link}`\n\n"
+        f"Отправь ссылку другу → он получает +{REFERRAL_REWARD} ген → ты тоже!\n\n"
+        f"⚠️ Бонус начисляется только после первого действия друга!",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
+        ])
+    )
+
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     user_id = message.from_user.id
@@ -508,6 +706,7 @@ async def cmd_status(message: types.Message):
     pack_gen = await get_pack_generations(user_id)
     pack_edit = await get_pack_edits(user_id)
     ref_count = await get_referral_count(user_id)
+    ref_stats = await get_referral_stats(user_id)
     
     await message.answer(
         f"📊 *Статистика*\n\n"
@@ -515,26 +714,10 @@ async def cmd_status(message: types.Message):
         f"🖼 Бесплатных ред: {remaining_edit} из {FREE_EDITS_PER_DAY}\n"
         f"📦 Куплено: {pack_gen} ген | {pack_edit} ред\n"
         f"👥 Приглашено друзей: {ref_count}\n"
-        f"🎁 Получено бонусов: {ref_count * REFERRAL_REWARD} ген",
+        f"🎁 Получено бонусов: {ref_count * REFERRAL_REWARD} ген\n"
+        f"⏳ В ожидании: {ref_stats['pending']}\n"
+        f"✅ Активных: {ref_stats['active']}",
         parse_mode="Markdown"
-    )
-
-@dp.message(Command("referral"))
-async def cmd_referral(message: types.Message):
-    user_id = message.from_user.id
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
-    count = await get_referral_count(user_id)
-    
-    await message.answer(
-        f"🔥 *Реферальная программа*\n\n"
-        f"👥 Приглашено друзей: {count}\n"
-        f"🎁 За каждого: +{REFERRAL_REWARD} ген\n\n"
-        f"🔗 Твоя ссылка:\n`{ref_link}`\n\n"
-        f"Отправь ссылку другу → он получает +{REFERRAL_REWARD} ген → ты тоже!",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")]
-        ])
     )
 
 @dp.message(Command("premium_buy"))
@@ -702,6 +885,22 @@ async def generate_by_text(message: types.Message):
         await message.answer("❌ Напиши подробнее (минимум 3 символа)")
         return
     
+    # Активация реферала при первом действии
+    was_activated = await activate_referral(user_id)
+    
+    # Выдача бонуса
+    was_rewarded = False
+    if was_activated or await get_referral_status(user_id) == REFERRAL_ACTIVE:
+        was_rewarded = await reward_referral(user_id, by_action=True)
+    
+    if was_rewarded:
+        await message.answer(
+            f"🎉 *Вы активировали бонус!*\n\n"
+            f"Вы получили +{REFERRAL_REWARD} генераций на счёт!\n"
+            f"Продолжайте пользоваться ботом 🎨",
+            parse_mode="Markdown"
+        )
+    
     premium = await is_premium(user_id)
     if premium:
         await process_generation(message, prompt)
@@ -734,6 +933,22 @@ async def edit_photo(message: types.Message):
     if len(edit_prompt) < 3:
         await message.answer("❌ Напиши подробнее, что изменить (минимум 3 символа)")
         return
+    
+    # Активация реферала при первом действии
+    was_activated = await activate_referral(user_id)
+    
+    # Выдача бонуса
+    was_rewarded = False
+    if was_activated or await get_referral_status(user_id) == REFERRAL_ACTIVE:
+        was_rewarded = await reward_referral(user_id, by_action=True)
+    
+    if was_rewarded:
+        await message.answer(
+            f"🎉 *Вы активировали бонус!*\n\n"
+            f"Вы получили +{REFERRAL_REWARD} генераций на счёт!\n"
+            f"Продолжайте пользоваться ботом 🎨",
+            parse_mode="Markdown"
+        )
     
     premium = await is_premium(user_id)
     if premium:
@@ -769,75 +984,92 @@ async def edit_photo(message: types.Message):
 # ================= CALLBACKS =================
 @dp.callback_query(lambda c: c.data == "referral_info")
 async def referral_info(callback: types.CallbackQuery):
+    await callback.answer()
+
     user_id = callback.from_user.id
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
     count = await get_referral_count(user_id)
-    chat_id = callback.message.chat.id
-    
-    await callback.message.delete()
-    
-    await bot.send_message(
-        chat_id,
+    stats = await get_referral_stats(user_id)
+
+    text = (
         f"🔥 *Реферальная программа*\n\n"
         f"👥 Приглашено друзей: {count}\n"
-        f"🎁 За каждого: +{REFERRAL_REWARD} ген\n"
-        f"🎉 Получено бонусов: {count * REFERRAL_REWARD} ген\n\n"
-        f"🔗 *Твоя реферальная ссылка:*\n"
-        f"`{ref_link}`\n\n"
-        f"📤 Отправь ссылку другу → он получает +{REFERRAL_REWARD} ген → ты тоже!",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Попробуй SelenaArtBot — генератор картинок через ИИ!")],
-            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_start")]
-        ])
+        f"🎁 За каждого активного: +{REFERRAL_REWARD} ген\n\n"
+        f"📈 *Статус рефералов:*\n"
+        f"• ⏳ В ожидании: {stats['pending']}\n"
+        f"• ✅ Активных: {stats['active']}\n"
+        f"• 💰 Награждено: {stats['rewarded']}\n\n"
+        f"🔗 *Твоя ссылка:*\n`{ref_link}`\n\n"
+        f"📤 Отправь другу — он получит +{REFERRAL_REWARD} ген за первое действие!\n"
+        f"⚠️ Бонус начисляется только после первого действия друга!"
     )
-    await callback.answer()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📤 Поделиться",
+            url=f"https://t.me/share/url?url={ref_link}&text=Попробуй SelenaArtBot — генератор картинок через ИИ! 🎨"
+        )],
+        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_start")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close")]
+    ])
+
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
 
 @dp.callback_query(lambda c: c.data == "back_to_start")
 async def back_to_start(callback: types.CallbackQuery):
-    chat_id = callback.message.chat.id
-    await callback.message.delete()
-    await cmd_start(callback.message)
     await callback.answer()
+    await cmd_start(callback.message)
 
 @dp.callback_query(lambda c: c.data == "my_referrals")
 async def my_referrals(callback: types.CallbackQuery):
+    await callback.answer()
+
     user_id = callback.from_user.id
     count = await get_referral_count(user_id)
-    chat_id = callback.message.chat.id
-    
-    await callback.message.delete()
-    
-    await bot.send_message(
-        chat_id,
+    stats = await get_referral_stats(user_id)
+
+    text = (
         f"📊 *Мои рефералы*\n\n"
         f"👥 Приглашено друзей: {count}\n"
-        f"🎁 Получено бонусов: {count * REFERRAL_REWARD} генераций\n\n"
+        f"🎁 Получено бонусов: {count * REFERRAL_REWARD} ген\n\n"
+        f"📈 *Статус рефералов:*\n"
+        f"• ⏳ В ожидании действия: {stats['pending']}\n"
+        f"• ✅ Активных (бонус скоро): {stats['active']}\n"
+        f"• 💰 Награждено: {stats['rewarded']}\n\n"
         f"🔥 Каждый новый друг → +{REFERRAL_REWARD} ген тебе и ему!\n"
-        f"Продолжай приглашать — бонусы безлимитны!",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_start")]
-        ])
+        f"⚠️ Бонус только после первого действия друга!"
     )
-    await callback.answer()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_start")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close")]
+    ])
+
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
 
 @dp.callback_query(lambda c: c.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
-    await callback.message.delete()
-    await cmd_start(callback.message)
     await callback.answer()
+    await cmd_start(callback.message)
 
 @dp.callback_query(lambda c: c.data == "close")
 async def close_message(callback: types.CallbackQuery):
-    await callback.message.delete()
     await callback.answer()
+    await callback.message.delete()
 
 @dp.callback_query(lambda c: c.data == "share")
 async def share_image(callback: types.CallbackQuery):
     await callback.answer("📤 Отправь этот результат другу!", show_alert=True)
 
-# ================= ADMIN COMMANDS =================
+# ================= АДМИН-КОМАНДЫ =================
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
@@ -847,14 +1079,23 @@ async def admin_panel(message: types.Message):
         return
     await message.answer(
         "👑 *Админ-панель*\n\n"
-        "/stats — статистика\n"
-        "/users — список пользователей\n"
-        "/premium [id] [дни] — выдать премиум\n"
-        "/rmpremium [id] — снять премиум\n"
-        "/add_gen [id] [кол-во] — добавить генерации\n"
-        "/add_edit [id] [кол-во] — добавить редактирования\n"
-        "/broadcast [текст] — рассылка\n"
-        "/stars — баланс Stars",
+        "📊 /stats — общая статистика\n"
+        "👥 /users — список пользователей\n"
+        "💰 /premium [id] [дни] — выдать премиум\n"
+        "❌ /rmpremium [id] — снять премиум\n"
+        "➕ /add_gen [id] [кол-во] — добавить генерации\n"
+        "➕ /add_edit [id] [кол-во] — добавить редактирования\n"
+        "➖ /rem_gen [id] [кол-во] — снять генерации\n"
+        "➖ /rem_edit [id] [кол-во] — снять редактирования\n"
+        "📢 /broadcast [текст] — рассылка\n"
+        "⭐ /stars — баланс Stars\n\n"
+        "👑 *Рефералы:*\n"
+        "📊 /ref_stats [id] — статистика рефералов\n"
+        "📋 /ref_logs [id] — логи рефералов\n"
+        "❌ /ref_reset [id] — сбросить все рефералы пользователя\n"
+        "🎁 /ref_reward [id] — принудительно выдать бонус рефереру\n"
+        "⏰ /ref_pending [id] — показать pending рефералов\n"
+        "🗑 /ref_clean [id] — очистить неактивных рефералов",
         parse_mode="Markdown"
     )
 
@@ -869,7 +1110,19 @@ async def admin_stats(message: types.Message):
         if len(parts) >= 3:
             users.add(parts[2])
     premium_keys = await redis_client.keys("selena:premium:*")
-    await message.answer(f"📊 *Статистика*\n\n👥 Пользователей: {len(users)}\n🌟 Премиум: {len(premium_keys)}", parse_mode="Markdown")
+    total_gens = 0
+    for key in keys:
+        val = await redis_client.get(key)
+        if val:
+            total_gens += int(val)
+    
+    await message.answer(
+        f"📊 *Статистика бота*\n\n"
+        f"👥 Пользователей: {len(users)}\n"
+        f"🌟 Премиум: {len(premium_keys)}\n"
+        f"🎨 Всего генераций: {total_gens}",
+        parse_mode="Markdown"
+    )
 
 @dp.message(Command("users"))
 async def admin_users(message: types.Message):
@@ -883,12 +1136,127 @@ async def admin_users(message: types.Message):
             user_id = parts[3]
             gens = await get_pack_generations(int(user_id))
             edits = await get_pack_edits(int(user_id))
-            users_data.append(f"`{user_id}` — {gens} ген, {edits} ред")
+            premium = "🌟" if await is_premium(int(user_id)) else ""
+            users_data.append(f"{premium} `{user_id}` — {gens} ген, {edits} ред")
     if not users_data:
         await message.answer("Нет пользователей с пакетами")
         return
-    text = "👥 *Пользователи с пакетами:*\n\n" + "\n".join(users_data[:30])
+    text = "👥 *Пользователи:*\n\n" + "\n".join(users_data[:50])
     await message.answer(text, parse_mode="Markdown")
+
+@dp.message(Command("rem_gen"))
+async def admin_remove_gen(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("❌ Использование: /rem_gen user_id количество")
+        return
+    try:
+        user_id = int(parts[1])
+        count = int(parts[2])
+        new_count = await remove_pack_generations(user_id, count)
+        await message.answer(f"✅ Снято {count} генераций у {user_id}. Осталось: {new_count}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("rem_edit"))
+async def admin_remove_edit(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("❌ Использование: /rem_edit user_id количество")
+        return
+    try:
+        user_id = int(parts[1])
+        count = int(parts[2])
+        new_count = await remove_pack_edits(user_id, count)
+        await message.answer(f"✅ Снято {count} редактирований у {user_id}. Осталось: {new_count}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("ref_reset"))
+async def admin_ref_reset(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Использование: /ref_reset user_id")
+        return
+    try:
+        user_id = int(parts[1])
+        keys = await redis_client.keys(f"selena:ref:status:{user_id}:*")
+        for key in keys:
+            await redis_client.delete(key)
+        await redis_client.set(f"selena:ref:count:{user_id}", 0)
+        await redis_client.delete(f"selena:ref:log:{user_id}")
+        await message.answer(f"✅ Все рефералы пользователя {user_id} сброшены")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("ref_reward"))
+async def admin_force_reward(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Использование: /ref_reward user_id")
+        return
+    try:
+        user_id = int(parts[1])
+        referrer_id = await get_referred_by(user_id)
+        if not referrer_id:
+            await message.answer(f"❌ У пользователя {user_id} нет реферера")
+            return
+        await add_pack_generations(referrer_id, REFERRAL_REWARD)
+        await increment_referral_count(referrer_id)
+        await set_referral_status(user_id, referrer_id, REFERRAL_REWARDED)
+        await message.answer(f"✅ Рефереру {referrer_id} начислен бонус +{REFERRAL_REWARD} ген за пользователя {user_id}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("ref_pending"))
+async def admin_show_pending(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    user_id = int(parts[1]) if len(parts) > 1 else None
+    if not user_id:
+        await message.answer("❌ Использование: /ref_pending user_id")
+        return
+    keys = await redis_client.keys(f"selena:ref:status:{user_id}:*")
+    pending = []
+    for key in keys:
+        status = await redis_client.get(key)
+        if status == REFERRAL_PENDING:
+            ref_user_id = key.split(":")[-1]
+            pending.append(ref_user_id)
+    if pending:
+        await message.answer(f"⏳ *Pending рефералы {user_id}:*\n" + "\n".join(pending[:30]), parse_mode="Markdown")
+    else:
+        await message.answer(f"Нет pending рефералов у {user_id}")
+
+@dp.message(Command("ref_clean"))
+async def admin_clean_pending(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Использование: /ref_clean user_id")
+        return
+    try:
+        user_id = int(parts[1])
+        keys = await redis_client.keys(f"selena:ref:status:{user_id}:*")
+        cleaned = 0
+        for key in keys:
+            status = await redis_client.get(key)
+            if status == REFERRAL_PENDING:
+                await redis_client.delete(key)
+                cleaned += 1
+        await message.answer(f"✅ Очищено {cleaned} неактивных pending рефералов у {user_id}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
 @dp.message(Command("premium"))
 async def admin_premium(message: types.Message):
@@ -948,6 +1316,50 @@ async def admin_add_edit(message: types.Message):
         await message.answer(f"✅ Добавлено {count} ред пользователю {user_id}")
     except:
         pass
+
+@dp.message(Command("ref_stats"))
+async def admin_ref_stats(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    user_id = int(parts[1]) if len(parts) > 1 else message.from_user.id
+    stats = await get_referral_stats(user_id)
+    await message.answer(
+        f"📊 *Реферальная статистика {user_id}:*\n\n"
+        f"⏳ В ожидании: {stats['pending']}\n"
+        f"✅ Активных: {stats['active']}\n"
+        f"💰 Награждено: {stats['rewarded']}\n"
+        f"📈 Всего: {stats['total']}",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("ref_logs"))
+async def admin_ref_logs(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Использование: /ref_logs user_id")
+        return
+    try:
+        user_id = int(parts[1])
+        log_key = f"selena:ref:log:{user_id}"
+        logs = await redis_client.lrange(log_key, 0, 19)
+        if not logs:
+            await message.answer(f"📋 Нет логов для пользователя {user_id}")
+            return
+        text = f"📋 *Логи рефералов для {user_id}:*\n\n"
+        for log in logs:
+            log_str = log.decode() if isinstance(log, bytes) else log
+            try:
+                import ast
+                log_data = ast.literal_eval(log_str)
+                text += f"• {log_data.get('timestamp', '?')[:16]} | {log_data.get('new_user_id')} | {log_data.get('status')} | {log_data.get('reason', '')}\n"
+            except:
+                text += f"• {log_str[:100]}\n"
+        await message.answer(text[:4000], parse_mode="Markdown")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
 @dp.message(Command("broadcast"))
 async def admin_broadcast(message: types.Message):
