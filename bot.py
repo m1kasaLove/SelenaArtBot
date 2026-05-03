@@ -234,16 +234,29 @@ async def add_watermark(image_bytes: BytesIO) -> BytesIO:
 
 # ================= SHARE BUTTON =================
 def get_share_keyboard(image_id: str = None):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔥 Поделиться результатом", callback_data="share")] if image_id else [],
-        [InlineKeyboardButton(text="👥 Пригласить друга (+3 gen)", callback_data="referral_info")],
-        [InlineKeyboardButton(text="📊 Мои рефералы", callback_data="my_referrals")],
-        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close")]
-    ])
-    return keyboard
+    rows = []
 
-# ================= QWEN/IMAGE-2 (СТАБИЛЬНАЯ) =================
-async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
+    if image_id:
+        rows.append([
+            InlineKeyboardButton(text="🔥 Поделиться результатом", callback_data="share")
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="👥 Пригласить друга (+3 gen)", callback_data="referral_info")
+    ])
+
+    rows.append([
+        InlineKeyboardButton(text="📊 Мои рефералы", callback_data="my_referrals")
+    ])
+
+    rows.append([
+        InlineKeyboardButton(text="❌ Закрыть", callback_data="close")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# ================= FLUX.2-PRO =================
+async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
@@ -253,9 +266,10 @@ async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry
     enhanced_prompt = enhance_prompt(prompt, is_edit=is_edit)
     
     payload = {
-        "model": "qwen/image-2",
+        "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": enhanced_prompt,
+            "resolution": "720p",
             "aspect_ratio": "1:1",
             "output_format": "png",
             "guidance_scale": 7.5
@@ -267,32 +281,32 @@ async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
         payload["input"]["image"] = img_base64
-        payload["input"]["strength"] = 0.7
-        logger.info(f"[QWEN] 🖼 Редактирование: {prompt[:50]}")
+        payload["input"]["strength"] = 0.65
+        logger.info(f"[FLUX] 🖼 Редактирование: {prompt[:50]}")
     else:
-        logger.info(f"[QWEN] 🎨 Генерация: {prompt[:50]}")
+        logger.info(f"[FLUX] 🎨 Генерация: {prompt[:50]}")
     
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
         try:
-            logger.info("[QWEN] Отправка запроса в Polza...")
+            logger.info("[FLUX] Отправка запроса в Polza...")
             async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
                 response_text = await resp.text()
-                logger.info(f"[QWEN] Статус: {resp.status}")
-                logger.info(f"[QWEN] Ответ: {response_text[:500]}")
+                logger.info(f"[FLUX] Статус: {resp.status}")
+                logger.info(f"[FLUX] Ответ: {response_text[:500]}")
                 
                 if resp.status != 200:
-                    logger.error(f"[QWEN] Ошибка {resp.status}: {response_text[:200]}")
+                    logger.error(f"[FLUX] Ошибка {resp.status}: {response_text[:200]}")
                     if retry:
                         await asyncio.sleep(2)
-                        return await generate_with_qwen(prompt, reference_image, retry=False)
+                        return await generate_with_flux(prompt, reference_image, retry=False)
                     return None
                 
                 data = await resp.json()
                 task_id = data.get("id")
                 if not task_id:
-                    logger.error(f"[QWEN] Нет ID задачи")
+                    logger.error(f"[FLUX] Нет ID задачи")
                     return None
-                logger.info(f"[QWEN] Task ID: {task_id}")
+                logger.info(f"[FLUX] Task ID: {task_id}")
             
             for attempt in range(60):
                 await asyncio.sleep(2)
@@ -303,7 +317,7 @@ async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry
                     
                     status_data = await resp.json()
                     status = status_data.get("status")
-                    logger.info(f"[QWEN] Попытка {attempt+1}/60, статус: {status}")
+                    logger.info(f"[FLUX] Попытка {attempt+1}/60, статус: {status}")
                     
                     if status == "completed":
                         image_url = None
@@ -321,46 +335,46 @@ async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry
                                 image_url = images[0] if isinstance(images[0], str) else images[0].get("url")
                         
                         if image_url:
-                            logger.info(f"[QWEN] Скачиваю...")
+                            logger.info(f"[FLUX] Скачиваю...")
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
-                                    logger.info(f"[QWEN] ✅ Успех! Размер: {len(img_bytes)} байт")
+                                    logger.info(f"[FLUX] ✅ Успех! Размер: {len(img_bytes)} байт")
                                     return BytesIO(img_bytes)
                         else:
-                            logger.error(f"[QWEN] URL не найден")
+                            logger.error(f"[FLUX] URL не найден")
                             if retry:
-                                return await generate_with_qwen(prompt, reference_image, retry=False)
+                                return await generate_with_flux(prompt, reference_image, retry=False)
                             return None
                             
                     elif status == "failed":
                         error_msg = status_data.get("error", {}).get("message", "Unknown")
-                        logger.error(f"[QWEN] ❌ Ошибка: {error_msg}")
+                        logger.error(f"[FLUX] ❌ Ошибка: {error_msg}")
                         if retry:
-                            return await generate_with_qwen(prompt, reference_image, retry=False)
+                            return await generate_with_flux(prompt, reference_image, retry=False)
                         return None
             
-            logger.error("[QWEN] ❌ Таймаут")
+            logger.error("[FLUX] ❌ Таймаут")
             return None
             
         except Exception as e:
-            logger.error(f"[QWEN] Исключение: {e}")
+            logger.error(f"[FLUX] Исключение: {e}")
             import traceback
             traceback.print_exc()
             if retry:
-                return await generate_with_qwen(prompt, reference_image, retry=False)
+                return await generate_with_flux(prompt, reference_image, retry=False)
             return None
 
 # ================= generate_image и edit_image =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    result = await generate_with_qwen(prompt)
+    result = await generate_with_flux(prompt)
     if result:
         return result
-    logger.warning("[GEN] Qwen не ответил, пробуем fallback")
+    logger.warning("[GEN] FLUX не ответил, пробуем fallback")
     return await generate_image_fallback(prompt)
 
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    return await generate_with_qwen(prompt, reference_image=image_bytes)
+    return await generate_with_flux(prompt, reference_image=image_bytes)
 
 async def generate_image_fallback(prompt: str) -> BytesIO | None:
     import urllib.parse
@@ -398,7 +412,6 @@ async def cmd_start(message: types.Message):
     pack_edit = await get_pack_edits(user_id)
     premium = await is_premium(user_id)
     
-    # Обработка реферальной ссылки
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("ref_"):
         referrer_code = args[1].replace("ref_", "")
@@ -432,18 +445,16 @@ async def cmd_start(message: types.Message):
                     )
                 break
     
-    share_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔥 Пригласить друга (+3 gen)", callback_data="referral_info")]
-    ])
+    share_kb = get_share_keyboard()
     
     menu = (
         f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
-        f"🤖 Модель: Qwen Image 2.0\n\n"
+        f"🤖 Модель: FLUX.2 Pro\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
         f"🔥 Пригласи друга → +{REFERRAL_REWARD} генераций тебе и ему!\n\n"
-        f"⚠️ *Важно:*\n"
+        f"⚠️ *Важно для редактирования:*\n"
         f"• Пишите чёткие запросы\n"
-        f"• Для редактирования: «сохрани лица и позы»\n\n"
+        f"• Указывайте: «сохрани лица и позы»\n\n"
         f"📝 Команды в меню слева от смайлика\n\n"
         f"🌙 @LunaIsLovelyLunaBot"
     )
@@ -459,7 +470,7 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "📖 *Помощь*\n\n"
-        "🤖 *Модель:* Qwen Image 2.0\n\n"
+        "🤖 *Модель:* FLUX.2 Pro\n\n"
         "✨ *Советы для лучшего редактирования:*\n"
         "• Пиши детально: «Сохрани лица и позы»\n"
         "• Указывай что именно нужно изменить\n"
@@ -601,7 +612,7 @@ async def payment_success(message: SuccessfulPayment):
 
 # ================= PROCESS =================
 async def process_generation(message: types.Message, prompt: str):
-    status_msg = await message.answer(f"🎨 *Генерирую (Qwen 2.0):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🎨 *Генерирую (FLUX.2 Pro):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     img = await generate_image(prompt)
     
@@ -616,7 +627,7 @@ async def process_generation(message: types.Message, prompt: str):
                 try:
                     await message.answer_photo(
                         photo, 
-                        caption=f"🎨 *{prompt[:100]}*\n🤖 Qwen Image 2.0 | SelenaArtBot",
+                        caption=f"🎨 *{prompt[:100]}*\n🤖 FLUX.2 Pro | SelenaArtBot",
                         parse_mode="Markdown",
                         reply_markup=get_share_keyboard(image_id),
                         timeout=60
@@ -640,7 +651,7 @@ async def process_generation(message: types.Message, prompt: str):
         )
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую (Qwen 2.0):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🖼 *Редактирую (FLUX.2 Pro):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     edited = await edit_image(image_bytes, prompt)
     
@@ -655,7 +666,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
                 try:
                     await message.answer_photo(
                         photo, 
-                        caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 Qwen Image 2.0 | SelenaArtBot",
+                        caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 FLUX.2 Pro | SelenaArtBot",
                         parse_mode="Markdown",
                         reply_markup=get_share_keyboard(image_id),
                         timeout=60
@@ -761,10 +772,12 @@ async def referral_info(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
     count = await get_referral_count(user_id)
+    chat_id = callback.message.chat.id
     
     await callback.message.delete()
     
-    await callback.message.answer(
+    await bot.send_message(
+        chat_id,
         f"🔥 *Реферальная программа*\n\n"
         f"👥 Приглашено друзей: {count}\n"
         f"🎁 За каждого: +{REFERRAL_REWARD} ген\n"
@@ -782,6 +795,7 @@ async def referral_info(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "back_to_start")
 async def back_to_start(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
     await callback.message.delete()
     await cmd_start(callback.message)
     await callback.answer()
@@ -790,10 +804,12 @@ async def back_to_start(callback: types.CallbackQuery):
 async def my_referrals(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     count = await get_referral_count(user_id)
+    chat_id = callback.message.chat.id
     
     await callback.message.delete()
     
-    await callback.message.answer(
+    await bot.send_message(
+        chat_id,
         f"📊 *Мои рефералы*\n\n"
         f"👥 Приглашено друзей: {count}\n"
         f"🎁 Получено бонусов: {count * REFERRAL_REWARD} генераций\n\n"
