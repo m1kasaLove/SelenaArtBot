@@ -242,13 +242,13 @@ async def generate_with_gemini(prompt: str, reference_image: BytesIO = None, ret
     
     enhanced_prompt = enhance_prompt(prompt)
     
-    # Используем google/gemini-3.1-flash-image-preview
+    # Базовый payload
     payload = {
         "model": "google/gemini-3.1-flash-image-preview",
         "input": {
             "prompt": enhanced_prompt,
             "aspect_ratio": "1:1",
-            "image_resolution": "1K",  # 0.5K, 1K, 2K, 4K
+            "image_resolution": "1K",
             "output_format": "png"
         },
         "async": True
@@ -258,7 +258,11 @@ async def generate_with_gemini(prompt: str, reference_image: BytesIO = None, ret
     if reference_image:
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
-        payload["input"]["images"] = [img_base64]  # Gemini использует массив images
+        
+        # 🔥 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: добавляем data:image/png;base64, префикс
+        formatted_image = f"data:image/png;base64,{img_base64}"
+        payload["input"]["images"] = [formatted_image]
+        payload["input"]["image_resolution"] = "1K"
         logger.info(f"[GEMINI] 🖼 Редактирование: {prompt[:50]}")
     else:
         logger.info(f"[GEMINI] 🎨 Генерация: {prompt[:50]}")
