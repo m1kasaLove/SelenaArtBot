@@ -436,111 +436,129 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
     }
-    
+
     is_edit = reference_image is not None
     enhanced_prompt = enhance_prompt(prompt, is_edit=is_edit)
-    
+
+    # 🔥 ВАЖНО: STRICT MODE Polza FLUX (без width/height)
     payload = {
         "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": enhanced_prompt,
-            "width": 1024,
-            "height": 1024,
+            "aspect_ratio": "1:1",
             "output_format": "png"
         },
         "async": True
     }
-    
-    # ✅ ОБНОВЛЁННЫЙ БЛОК ДЛЯ РЕДАКТИРОВАНИЯ
+
+    # 🖼 редактирование (image-to-image)
     if reference_image:
         reference_image.seek(0)
-        img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
-        payload["input"]["image"] = img_base64
+        img_base64 = base64.b64encode(reference_image.read()).decode("utf-8")
+
+        # ⚠️ Polza чаще ожидает images[], а не image
+        payload["input"]["images"] = [img_base64]
         payload["input"]["strength"] = 0.65
+
         logger.info(f"[FLUX] 🖼 Редактирование: {prompt[:50]}")
     else:
         logger.info(f"[FLUX] 🎨 Генерация: {prompt[:50]}")
-    
+
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
         try:
             logger.info("[FLUX] Отправка запроса в Polza...")
-            async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
+
+            async with session.post(
+                "https://polza.ai/api/v1/media",
+                headers=headers,
+                json=payload
+            ) as resp:
+
                 response_text = await resp.text()
                 logger.info(f"[FLUX] Статус: {resp.status}")
                 logger.info(f"[FLUX] Ответ: {response_text[:500]}")
-                
+
                 if resp.status != 200:
                     logger.error(f"[FLUX] Ошибка {resp.status}: {response_text[:200]}")
                     if retry:
                         await asyncio.sleep(2)
                         return await generate_with_flux(prompt, reference_image, retry=False)
                     return None
-                
+
                 data = await resp.json()
                 task_id = data.get("id")
+
                 if not task_id:
-                    logger.error(f"[FLUX] Нет ID задачи")
+                    logger.error("[FLUX] Нет ID задачи")
                     return None
+
                 logger.info(f"[FLUX] Task ID: {task_id}")
-            
+
+            # 🔄 polling
             for attempt in range(60):
-                # ✅ ОБНОВЛЁННАЯ ЗАДЕРЖКА
-                await asyncio.sleep(1.5 if attempt < 20 else 2.5)
-                
-                async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as resp:
+                await asyncio.sleep(2)
+
+                async with session.get(
+                    f"https://polza.ai/api/v1/media/{task_id}",
+                    headers=headers
+                ) as resp:
+
                     if resp.status != 200:
                         continue
-                    
+
                     status_data = await resp.json()
                     status = status_data.get("status")
+
                     logger.info(f"[FLUX] Попытка {attempt+1}/60, статус: {status}")
-                    
+
                     if status == "completed":
                         image_url = None
-                        
-                        # ✅ ОБНОВЛЁННЫЙ БЛОК ИЗВЛЕЧЕНИЯ URL
+
                         data_field = status_data.get("data")
-                        
+
                         if isinstance(data_field, str):
                             image_url = data_field
                         elif isinstance(data_field, dict):
                             image_url = data_field.get("url")
-                        elif isinstance(data_field, list) and len(data_field) > 0:
-                            image_url = data_field[0] if isinstance(data_field[0], str) else data_field[0].get("url")
-                        
+                        elif isinstance(data_field, list) and data_field:
+                            item = data_field[0]
+                            image_url = item if isinstance(item, str) else item.get("url")
+
                         if not image_url:
                             output = status_data.get("output", {})
                             images = output.get("images", [])
                             if images:
-                                image_url = images[0] if isinstance(images[0], str) else images[0].get("url")
-                        
+                                item = images[0]
+                                image_url = item if isinstance(item, str) else item.get("url")
+
                         if image_url:
-                            logger.info(f"[FLUX] Скачиваю...")
+                            logger.info("[FLUX] Скачиваю изображение...")
+
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
-                                    logger.info(f"[FLUX] ✅ Успех! Размер: {len(img_bytes)} байт")
+                                    logger.info(f"[FLUX] ✅ Успех: {len(img_bytes)} байт")
                                     return BytesIO(img_bytes)
-                        else:
-                            logger.error(f"[FLUX] URL не найден")
-                            if retry:
-                                return await generate_with_flux(prompt, reference_image, retry=False)
-                            return None
-                            
+
+                        logger.error("[FLUX] URL не найден")
+                        return None
+
                     elif status == "failed":
                         error_msg = status_data.get("error", {}).get("message", "Unknown")
-                        logger.error(f"[FLUX] ❌ Ошибка: {error_msg}")
+                        logger.error(f"[FLUX] ❌ Failed: {error_msg}")
+
                         if retry:
                             return await generate_with_flux(prompt, reference_image, retry=False)
                         return None
-            
-            logger.error("[FLUX] ❌ Таймаут")
+
+            logger.error("[FLUX] ❌ Timeout")
             return None
-            
+
         except Exception as e:
-            logger.error(f"[FLUX] Исключение: {e}")
+            logger.error(f"[FLUX] Exception: {e}")
             import traceback
             traceback.print_exc()
+
             if retry:
                 return await generate_with_flux(prompt, reference_image, retry=False)
             return None
