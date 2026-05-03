@@ -16,7 +16,7 @@ from aiogram.types import (
     LabeledPrice, PreCheckoutQuery, SuccessfulPayment, BufferedInputFile,
     InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeDefault
 )
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from PIL import Image, ImageDraw, ImageFont
 
 import redis.asyncio as redis
@@ -72,19 +72,12 @@ async def set_commands():
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 
-# ================= SAFE REDIS =================
-async def safe_redis_get(key: str, default: int = 0) -> int:
-    try:
-        val = await redis_client.get(key)
-        return int(val) if val else default
-    except:
-        return default
-
 # ================= REDIS HELPERS =================
 async def get_generations_today(user_id: int) -> int:
     day_key = int(datetime.now().timestamp() // 86400)
     key = f"selena:gen:{user_id}:{day_key}"
-    return await safe_redis_get(key)
+    val = await redis_client.get(key)
+    return int(val) if val else 0
 
 async def incr_generations_today(user_id: int) -> int:
     day_key = int(datetime.now().timestamp() // 86400)
@@ -96,7 +89,8 @@ async def incr_generations_today(user_id: int) -> int:
 async def get_edits_today(user_id: int) -> int:
     day_key = int(datetime.now().timestamp() // 86400)
     key = f"selena:edit:{user_id}:{day_key}"
-    return await safe_redis_get(key)
+    val = await redis_client.get(key)
+    return int(val) if val else 0
 
 async def incr_edits_today(user_id: int) -> int:
     day_key = int(datetime.now().timestamp() // 86400)
@@ -166,7 +160,20 @@ async def get_referral_count(user_id: int) -> int:
 async def increment_referral_count(user_id: int):
     await redis_client.incr(f"selena:ref:count:{user_id}")
 
-# ================= FLUX GENERATION (FIXED) =================
+async def get_referrer_by_code(code: str) -> int | None:
+    async for key in redis_client.scan_iter("selena:ref:code:*"):
+        stored_code = await redis_client.get(key)
+        if stored_code == code:
+            return int(key.split(":")[-1])
+    return None
+
+async def has_referral(user_id: int) -> bool:
+    return await redis_client.get(f"selena:ref:by:{user_id}") is not None
+
+async def set_referrer(user_id: int, referrer_id: int):
+    await redis_client.set(f"selena:ref:by:{user_id}", referrer_id)
+
+# ================= FLUX GENERATION (С RESOLUTION) =================
 async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
@@ -177,6 +184,7 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": f"ultra realistic, 4k cinematic: {prompt}",
+            "resolution": "1024x1024",  # ✅ ОБЯЗАТЕЛЬНЫЙ ПАРАМЕТР
             "aspect_ratio": "1:1",
             "output_format": "png"
         },
@@ -266,6 +274,16 @@ async def generate_fallback(prompt: str) -> BytesIO | None:
             pass
     return None
 
+async def generate_image(prompt: str) -> BytesIO | None:
+    result = await generate_with_flux(prompt)
+    if result:
+        return result
+    logger.warning("[GEN] FLUX не ответил, пробуем fallback")
+    return await generate_fallback(prompt)
+
+async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
+    return await generate_with_flux(prompt, reference_image=image_bytes)
+
 # ================= WATERMARK =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
     image_bytes.seek(0)
@@ -288,17 +306,6 @@ def get_share_keyboard(image_id: str = None):
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# ================= GENERATE IMAGE =================
-async def generate_image(prompt: str) -> BytesIO | None:
-    result = await generate_with_flux(prompt)
-    if result:
-        return result
-    logger.warning("[GEN] FLUX не ответил, пробуем fallback")
-    return await generate_fallback(prompt)
-
-async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    return await generate_with_flux(prompt, reference_image=image_bytes)
-
 # ================= COMMANDS =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -306,6 +313,34 @@ async def cmd_start(message: types.Message):
     pack_gen = await get_pack_generations(user_id)
     pack_edit = await get_pack_edits(user_id)
     premium = await is_premium(user_id)
+
+    # ОБРАБОТКА РЕФЕРАЛЬНОЙ ССЫЛКИ
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("ref_"):
+        ref_code = args[1].replace("ref_", "")
+        referrer_id = await get_referrer_by_code(ref_code)
+
+        if referrer_id and referrer_id != user_id and not await has_referral(user_id):
+            await set_referrer(user_id, referrer_id)
+            await increment_referral_count(referrer_id)
+            await add_pack_generations(referrer_id, REFERRAL_REWARD)
+
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    f"🎉 *По вашей ссылке пришёл новый пользователь!*\n"
+                    f"👥 Приглашённый: {message.from_user.first_name}\n"
+                    f"🎁 Вы получили +{REFERRAL_REWARD} генераций!",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+
+            await message.answer(
+                f"🎉 *Вы получили +{REFERRAL_REWARD} генераций за регистрацию по ссылке!*\n\n"
+                f"🔥 Просто напишите что нарисовать!",
+                parse_mode="Markdown"
+            )
 
     share_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔥 Пригласить друга (+3 gen)", callback_data="referral_info")],
@@ -545,7 +580,7 @@ async def generate_by_text(message: types.Message):
 @dp.message(F.photo)
 async def edit_photo(message: types.Message):
     user_id = message.from_user.id
-    edit_prompt = message.caption
+    edit_prompt = message.caption or ""
 
     if not edit_prompt:
         await message.answer("✏️ *Напиши в подписи, что изменить на фото*", parse_mode="Markdown")
@@ -586,7 +621,7 @@ async def edit_photo(message: types.Message):
     file_bytes.seek(0)
     await process_edit(message, file_bytes, edit_prompt)
 
-# ================= CALLBACKS (FIXED) =================
+# ================= CALLBACKS =================
 @dp.callback_query(F.data == "referral_info")
 async def referral_info_cb(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -630,8 +665,7 @@ async def admin_panel(message: types.Message):
         "/rmpremium [id] — снять премиум\n"
         "/add_gen [id] [кол-во] — добавить генерации\n"
         "/add_edit [id] [кол-во] — добавить редактирования\n"
-        "/broadcast [текст] — рассылка\n"
-        "/stars — баланс Stars",
+        "/broadcast [текст] — рассылка",
         parse_mode="Markdown"
     )
 
@@ -639,9 +673,8 @@ async def admin_panel(message: types.Message):
 async def admin_stats(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    keys = await redis_client.keys("selena:gen:*")
     users = set()
-    for key in keys:
+    async for key in redis_client.scan_iter("selena:gen:*"):
         parts = key.split(":")
         if len(parts) >= 3:
             users.add(parts[2])
@@ -714,9 +747,8 @@ async def admin_broadcast(message: types.Message):
     text = message.text.replace("/broadcast", "").strip()
     if not text:
         return
-    keys = await redis_client.keys("selena:gen:*")
     users = set()
-    for key in keys:
+    async for key in redis_client.scan_iter("selena:gen:*"):
         parts = key.split(":")
         if len(parts) >= 3:
             users.add(int(parts[2]))
@@ -730,22 +762,6 @@ async def admin_broadcast(message: types.Message):
             pass
     await message.answer(f"✅ Отправлено: {sent}")
 
-@dp.message(Command("stars"))
-async def admin_stars(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getStarBalance") as resp:
-                data = await resp.json()
-                if data.get("ok"):
-                    stars = data.get("result", {}).get("balance", 0)
-                    await message.answer(f"⭐ *Баланс Stars бота:* {stars}", parse_mode="Markdown")
-                else:
-                    await message.answer("❌ Ошибка")
-    except:
-        pass
-
 # ================= STARTUP =================
 async def on_startup(app):
     global redis_client
@@ -755,12 +771,23 @@ async def on_startup(app):
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"✅ Webhook set: {WEBHOOK_URL}")
+    await dp.startup(bot)
+    logger.info("✅ Bot started properly")
+
+async def on_shutdown(app):
+    await dp.shutdown(bot)
+    if redis_client:
+        await redis_client.close()
+    await bot.session.close()
+    logger.info("✅ Bot shutdown")
 
 def create_app():
     app = web.Application()
     app.router.add_get("/", lambda r: web.Response(text="SelenaArtBot is alive! 🎨"))
     SimpleRequestHandler(dp, bot).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
     app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
     return app
 
 if __name__ == "__main__":
