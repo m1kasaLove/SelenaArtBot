@@ -233,8 +233,8 @@ def get_share_keyboard(image_id: str = None):
     ])
     return keyboard
 
-# ================= GOOGLE/GEMINI-3.1-FLASH-IMAGE-PREVIEW =================
-async def generate_with_gemini(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
+# ================= QWEN/IMAGE-2 (ЛУЧШАЯ МОДЕЛЬ ДЛЯ РЕДАКТИРОВАНИЯ) =================
+async def generate_with_qwen(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
@@ -242,14 +242,13 @@ async def generate_with_gemini(prompt: str, reference_image: BytesIO = None, ret
     
     enhanced_prompt = enhance_prompt(prompt)
     
-    # Базовый payload
     payload = {
-        "model": "google/gemini-3.1-flash-image-preview",
+        "model": "qwen/image-2",
         "input": {
             "prompt": enhanced_prompt,
             "aspect_ratio": "1:1",
-            "image_resolution": "1K",
-            "output_format": "png"
+            "output_format": "png",
+            "guidance_scale": 7.5
         },
         "async": True
     }
@@ -258,38 +257,36 @@ async def generate_with_gemini(prompt: str, reference_image: BytesIO = None, ret
     if reference_image:
         reference_image.seek(0)
         img_base64 = base64.b64encode(reference_image.read()).decode('utf-8')
-        
-        # 🔥 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: добавляем data:image/png;base64, префикс
-        formatted_image = f"data:image/png;base64,{img_base64}"
-        payload["input"]["images"] = [formatted_image]
-        payload["input"]["image_resolution"] = "1K"
-        logger.info(f"[GEMINI] 🖼 Редактирование: {prompt[:50]}")
+        payload["input"]["image"] = img_base64
+        payload["input"]["strength"] = 0.8
+        logger.info(f"[QWEN] 🖼 Редактирование: {prompt[:50]}")
+        logger.info(f"[QWEN] Сохраняем лицо, меняем одежду/фон")
     else:
-        logger.info(f"[GEMINI] 🎨 Генерация: {prompt[:50]}")
+        logger.info(f"[QWEN] 🎨 Генерация: {prompt[:50]}")
     
     async with aiohttp.ClientSession() as session:
         try:
-            logger.info("[GEMINI] Отправка запроса в Polza...")
+            logger.info("[QWEN] Отправка запроса в Polza...")
             async with session.post("https://polza.ai/api/v1/media", headers=headers, json=payload) as resp:
                 response_text = await resp.text()
-                logger.info(f"[GEMINI] Статус: {resp.status}")
-                logger.info(f"[GEMINI] Ответ: {response_text[:500]}")
+                logger.info(f"[QWEN] Статус: {resp.status}")
+                logger.info(f"[QWEN] Ответ: {response_text[:500]}")
                 
                 if resp.status != 200:
-                    logger.error(f"[GEMINI] Ошибка {resp.status}: {response_text[:200]}")
+                    logger.error(f"[QWEN] Ошибка {resp.status}: {response_text[:200]}")
                     if retry:
                         await asyncio.sleep(2)
-                        return await generate_with_gemini(prompt, reference_image, retry=False)
+                        return await generate_with_qwen(prompt, reference_image, retry=False)
                     return None
                 
                 data = await resp.json()
                 task_id = data.get("id")
                 if not task_id:
-                    logger.error(f"[GEMINI] Нет ID задачи")
+                    logger.error(f"[QWEN] Нет ID задачи")
                     return None
-                logger.info(f"[GEMINI] Task ID: {task_id}")
+                logger.info(f"[QWEN] Task ID: {task_id}")
             
-            for attempt in range(45):
+            for attempt in range(60):
                 await asyncio.sleep(2)
                 
                 async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as resp:
@@ -298,7 +295,7 @@ async def generate_with_gemini(prompt: str, reference_image: BytesIO = None, ret
                     
                     status_data = await resp.json()
                     status = status_data.get("status")
-                    logger.info(f"[GEMINI] Попытка {attempt+1}, статус: {status}")
+                    logger.info(f"[QWEN] Попытка {attempt+1}/60, статус: {status}")
                     
                     if status == "completed":
                         image_url = None
@@ -316,49 +313,49 @@ async def generate_with_gemini(prompt: str, reference_image: BytesIO = None, ret
                                 image_url = images[0] if isinstance(images[0], str) else images[0].get("url")
                         
                         if image_url:
-                            logger.info(f"[GEMINI] Скачиваю...")
+                            logger.info(f"[QWEN] Скачиваю...")
                             async with session.get(image_url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
-                                    logger.info(f"[GEMINI] ✅ Успех! Размер: {len(img_bytes)} байт")
+                                    logger.info(f"[QWEN] ✅ Успех! Размер: {len(img_bytes)} байт")
                                     return BytesIO(img_bytes)
                         else:
-                            logger.error(f"[GEMINI] URL не найден")
+                            logger.error(f"[QWEN] URL не найден")
                             if retry:
-                                return await generate_with_gemini(prompt, reference_image, retry=False)
+                                return await generate_with_qwen(prompt, reference_image, retry=False)
                             return None
                             
                     elif status == "failed":
                         error_msg = status_data.get("error", {}).get("message", "Unknown")
-                        logger.error(f"[GEMINI] ❌ Ошибка: {error_msg}")
+                        logger.error(f"[QWEN] ❌ Ошибка: {error_msg}")
                         if retry:
-                            return await generate_with_gemini(prompt, reference_image, retry=False)
+                            return await generate_with_qwen(prompt, reference_image, retry=False)
                         return None
             
-            logger.error("[GEMINI] ❌ Таймаут")
+            logger.error("[QWEN] ❌ Таймаут")
             return None
             
         except Exception as e:
-            logger.error(f"[GEMINI] Исключение: {e}")
+            logger.error(f"[QWEN] Исключение: {e}")
             import traceback
             traceback.print_exc()
             if retry:
-                return await generate_with_gemini(prompt, reference_image, retry=False)
+                return await generate_with_qwen(prompt, reference_image, retry=False)
             return None
 
 # ================= generate_image и edit_image =================
 async def generate_image(prompt: str) -> BytesIO | None:
-    """Генерация через Google Gemini 3.1 Flash"""
-    result = await generate_with_gemini(prompt)
+    """Генерация через Qwen/Image-2"""
+    result = await generate_with_qwen(prompt)
     if result:
         return result
-    logger.warning("[GEN] Gemini не ответил, пробуем fallback")
+    logger.warning("[GEN] Qwen не ответил, пробуем fallback")
     return await generate_image_fallback(prompt)
 
 
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    """Редактирование через Google Gemini 3.1 Flash"""
-    return await generate_with_gemini(prompt, reference_image=image_bytes)
+    """Редактирование через Qwen/Image-2 (сохраняет лицо)"""
+    return await generate_with_qwen(prompt, reference_image=image_bytes)
 
 
 async def generate_image_fallback(prompt: str) -> BytesIO | None:
@@ -423,9 +420,11 @@ async def cmd_start(message: types.Message):
     
     menu = (
         f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
-        f"🤖 Модель: Google Gemini 3.1 Flash\n\n"
+        f"🤖 Модель: Qwen Image 2.0 (лучшая для редактирования лиц)\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n"
         f"🔥 Пригласи друга → +{REFERRAL_REWARD} генераций тебе и ему!\n\n"
+        f"💡 *Совет:* Для лучшего результата пиши детально. Например:\n"
+        f"«Сохрани лица и позы людей, измени одежду на пляжную»\n\n"
         f"📝 Команды в меню слева от смайлика\n\n"
         f"🌙 @LunaIsLovelyLunaBot"
     )
@@ -441,7 +440,11 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "📖 *Помощь*\n\n"
-        "🤖 *Модель:* Google Gemini 3.1 Flash\n\n"
+        "🤖 *Модель:* Qwen Image 2.0\n\n"
+        "✨ *Советы для лучшего редактирования:*\n"
+        "• Пиши детально: «Сохрани лица и позы»\n"
+        "• Указывай что именно нужно изменить\n"
+        "• Пример: «Оставь лица теми же, одень их в пляжную одежду»\n\n"
         "**Генерация:** напиши описание\n"
         "**Редактирование:** отправь фото + подпись\n\n"
         "**Команды в меню:**\n"
@@ -576,7 +579,7 @@ async def payment_success(message: SuccessfulPayment):
 
 # ================= PROCESS =================
 async def process_generation(message: types.Message, prompt: str):
-    status_msg = await message.answer(f"🎨 *Генерирую (Gemini 3.1 Flash):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🎨 *Генерирую (Qwen 2.0):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     img = await generate_image(prompt)
     
@@ -589,7 +592,7 @@ async def process_generation(message: types.Message, prompt: str):
             
             await message.answer_photo(
                 photo, 
-                caption=f"🎨 *{prompt[:100]}*\n🤖 Google Gemini 3.1 Flash | SelenaArtBot",
+                caption=f"🎨 *{prompt[:100]}*\n🤖 Qwen Image 2.0 | SelenaArtBot",
                 parse_mode="Markdown",
                 reply_markup=get_share_keyboard(image_id)
             )
@@ -606,7 +609,7 @@ async def process_generation(message: types.Message, prompt: str):
         )
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую (Gemini 3.1 Flash):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🖼 *Редактирую (Qwen 2.0):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
     
     edited = await edit_image(image_bytes, prompt)
     
@@ -618,7 +621,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
         
         await message.answer_photo(
             photo, 
-            caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 Google Gemini 3.1 Flash | SelenaArtBot",
+            caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 Qwen Image 2.0 | SelenaArtBot",
             parse_mode="Markdown",
             reply_markup=get_share_keyboard(image_id)
         )
@@ -627,8 +630,9 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
         await status_msg.edit_text(
             "❌ *Ошибка редактирования*\n\n"
             "Попробуй:\n"
-            "• `make it black and white`\n"
-            "• `increase contrast`\n\n"
+            "• `сделай чёрно-белым`\n"
+            "• `сделай ярче`\n"
+            "• Напиши детальнее: «Сохрани лица и позы»\n\n"
             "🌙 @LunaIsLovelyLunaBot",
             parse_mode="Markdown"
         )
