@@ -173,18 +173,32 @@ async def has_referral(user_id: int) -> bool:
 async def set_referrer(user_id: int, referrer_id: int):
     await redis_client.set(f"selena:ref:by:{user_id}", referrer_id)
 
-# ================= GPT GENERATION =================
-def build_edit_prompt(user_prompt: str) -> str:
-    return f"""Edit the provided image.
+# ================= STYLE PROMPT BUILDER =================
+def build_style_prompt(user_prompt: str) -> str:
+    return f"""
+Apply a visual style transformation only.
 
-CRITICAL CONSTRAINTS (MUST FOLLOW):
-- preserve the exact same person, same face, same identity
-- do NOT change gender, age, or facial features
-- keep the original pose and composition
-- only modify: {user_prompt}
+STRICT RULES:
+- Keep the exact same person
+- Keep face identity unchanged
+- Keep body, pose, proportions identical
+- Do NOT change gender, age, ethnicity
 
-The result must look like the same person with only the requested changes."""
+ONLY change visual style aspects such as:
+{user_prompt}
 
+Allowed changes:
+- lighting
+- color grading
+- texture style
+- artistic style
+- cinematic look
+
+Do NOT redesign the subject.
+This is a style transfer, not a new generation.
+"""
+
+# ================= GPT GENERATION (STYLE MODE) =================
 async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
@@ -195,7 +209,7 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
     payload = {
         "model": "openai/gpt-5.4-image-2",
         "input": {
-            "prompt": prompt if not reference_image else build_edit_prompt(prompt),
+            "prompt": prompt if not reference_image else build_style_prompt(prompt),
             "aspect_ratio": "1:1",
             "output_format": "png"
         },
@@ -205,10 +219,18 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
     if reference_image:
         reference_image.seek(0)
         b64 = base64.b64encode(reference_image.read()).decode()
-        payload["input"]["image"] = f"data:image/png;base64,{b64}"
-        payload["input"]["strength"] = 0.5
-        payload["input"]["negative_prompt"] = "different person, changed face, other gender, distorted features"
-        logger.info("[GPT] 🖼 EDIT MODE (сохраняем лицо)")
+        
+        # ✅ ИСПРАВЛЕННЫЕ ПАРАМЕТРЫ ДЛЯ STYLE MODE
+        payload["input"]["images"] = [f"data:image/png;base64,{b64}"]  # массив images
+        payload["input"]["strength"] = 0.18  # ОЧЕНЬ ВАЖНО: низкое значение для сохранения лица
+        payload["input"]["mode"] = "style"
+        payload["input"]["preserve_identity"] = True
+        payload["input"]["style_strength"] = 0.8
+        
+        # ❌ УБИРАЕМ negative_prompt — он портит identity stability
+        # payload["input"]["negative_prompt"] = "..."
+        
+        logger.info("[GPT] 🎨 STYLE MODE (сохраняем лицо, меняем стиль)")
     else:
         logger.info("[GPT] 🎨 GENERATE MODE")
 
@@ -254,17 +276,17 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
                         d = data.get("data")
                         if isinstance(d, str):
                             url = d
-                            logger.info(f"[GPT] URL из data (str): {url[:50]}...")
+                            logger.info(f"[GPT] URL из data (str)")
                         elif isinstance(d, dict):
                             url = d.get("url")
-                            logger.info(f"[GPT] URL из data.url: {url[:50]}...")
+                            logger.info(f"[GPT] URL из data.url")
                         elif isinstance(d, list) and d:
                             first = d[0]
                             if isinstance(first, str):
                                 url = first
                             elif isinstance(first, dict):
                                 url = first.get("url")
-                            logger.info(f"[GPT] URL из data[0]: {url[:50]}...")
+                            logger.info(f"[GPT] URL из data[0]")
                         
                         if not url:
                             output = data.get("output", {})
@@ -275,10 +297,10 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
                                     url = item
                                 elif isinstance(item, dict):
                                     url = item.get("url")
-                                logger.info(f"[GPT] URL из output.images: {url[:50]}...")
+                                logger.info(f"[GPT] URL из output.images")
                         
                         if url:
-                            logger.info(f"[GPT] Скачиваю картинку: {url[:80]}...")
+                            logger.info(f"[GPT] Скачиваю картинку...")
                             async with session.get(url) as img_resp:
                                 if img_resp.status == 200:
                                     img_bytes = await img_resp.read()
@@ -287,7 +309,7 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
                                 else:
                                     logger.error(f"[GPT] Ошибка скачивания: {img_resp.status}")
                         else:
-                            logger.error(f"[GPT] Не удалось найти URL в ответе: {data}")
+                            logger.error(f"[GPT] Не удалось найти URL в ответе")
                             if retry:
                                 return await generate_with_gpt(prompt, reference_image, False)
                             return None
@@ -415,7 +437,8 @@ async def cmd_help(message: types.Message):
         "📖 *Помощь*\n\n"
         "🤖 *Модель:* GPT-5.4-Image-2\n\n"
         "**Генерация:** напиши описание\n"
-        "**Редактирование:** отправь фото + подпись\n\n"
+        "**Редактирование (Style Mode):** отправь фото + описание стиля\n"
+        "Пример: `сделай киберпанк стиль`\n\n"
         "🌙 @LunaIsLovelyLunaBot",
         parse_mode="Markdown"
     )
@@ -576,7 +599,7 @@ async def process_generation(message: types.Message, prompt: str):
         pass
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую (GPT-5.4):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🎨 *Применяю стиль (Style Mode):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
 
     edited = await edit_image(image_bytes, prompt)
 
@@ -591,7 +614,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
                 try:
                     await message.answer_photo(
                         photo,
-                        caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
+                        caption=f"✅ *Стиль применён!*\n📝 {prompt[:100]}\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
                         parse_mode="Markdown",
                         reply_markup=get_share_keyboard(image_id),
                         timeout=60
@@ -608,7 +631,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
             await status_msg.edit_text("❌ *Ошибка при обработке картинки*", parse_mode="Markdown")
     else:
         await status_msg.edit_text(
-            "❌ *Ошибка редактирования*\n\nПопробуй:\n• `сделай чёрно-белым`\n• `увеличь контраст`\n\n🌙 @LunaIsLovelyLunaBot",
+            "❌ *Ошибка применения стиля*\n\nПопробуй:\n• `сделай киберпанк стиль`\n• `сделай акварельный стиль`\n\n🌙 @LunaIsLovelyLunaBot",
             parse_mode="Markdown"
         )
 
@@ -653,11 +676,11 @@ async def edit_photo(message: types.Message):
     edit_prompt = message.caption or ""
 
     if not edit_prompt:
-        await message.answer("✏️ *Напиши в подписи, что изменить на фото*", parse_mode="Markdown")
+        await message.answer("✏️ *Напиши в подписи, какой стиль применить*\n\nПример: `сделай киберпанк стиль`", parse_mode="Markdown")
         return
 
     if len(edit_prompt) < 3:
-        await message.answer("❌ Напиши подробнее, что изменить (минимум 3 символа)")
+        await message.answer("❌ Напиши подробнее, какой стиль применить")
         return
 
     premium = await is_premium(user_id)
