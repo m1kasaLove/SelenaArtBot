@@ -174,6 +174,18 @@ async def set_referrer(user_id: int, referrer_id: int):
     await redis_client.set(f"selena:ref:by:{user_id}", referrer_id)
 
 # ================= GPT GENERATION =================
+# ================= GPT GENERATION =================
+def build_edit_prompt(user_prompt: str) -> str:
+    return f"""Edit the provided image.
+
+CRITICAL CONSTRAINTS (MUST FOLLOW):
+- preserve the exact same person, same face, same identity
+- do NOT change gender, age, or facial features
+- keep the original pose and composition
+- only modify: {user_prompt}
+
+The result must look like the same person with only the requested changes."""
+
 async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
@@ -184,7 +196,7 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
     payload = {
         "model": "openai/gpt-5.4-image-2",
         "input": {
-            "prompt": f"same person, same face, keep identity, minimal changes: {prompt}",
+            "prompt": prompt if not reference_image else build_edit_prompt(prompt),
             "aspect_ratio": "1:1",
             "output_format": "png"
         },
@@ -194,11 +206,10 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
     if reference_image:
         reference_image.seek(0)
         b64 = base64.b64encode(reference_image.read()).decode()
-        
-        # GPT использует поле image
         payload["input"]["image"] = f"data:image/png;base64,{b64}"
-        
-        logger.info("[GPT] 🖼 EDIT MODE")
+        payload["input"]["strength"] = 0.5  # 0.3 — слабо, 1.0 — сильно
+        payload["input"]["negative_prompt"] = "different person, changed face, other gender, distorted features"
+        logger.info("[GPT] 🖼 EDIT MODE (сохраняем лицо)")
     else:
         logger.info("[GPT] 🎨 GENERATE MODE")
 
