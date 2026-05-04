@@ -184,7 +184,7 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": f"ultra realistic, 4k cinematic: {prompt}",
-            "resolution": "1024x1024",
+            "resolution": "1080p",
             "aspect_ratio": "1:1",
             "output_format": "png"
         },
