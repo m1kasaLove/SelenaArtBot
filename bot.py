@@ -180,13 +180,13 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "Content-Type": "application/json"
     }
 
+    # ✅ ПРАВИЛЬНЫЙ БАЗОВЫЙ PAYLOAD
     payload = {
         "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": f"ultra realistic, 4k cinematic: {prompt}",
-            "resolution": "1080p",
             "aspect_ratio": "1:1",
-            "output_format": "png"
+            "image_resolution": "2K"
         },
         "async": True
     }
@@ -194,8 +194,8 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
     if reference_image:
         reference_image.seek(0)
         b64 = base64.b64encode(reference_image.read()).decode()
-        payload["input"]["image"] = f"data:image/png;base64,{b64}"
-        payload["input"]["strength"] = 0.65
+        # ✅ ДЛЯ РЕДАКТИРОВАНИЯ ДОБАВЛЯЕМ images
+        payload["input"]["images"] = [f"data:image/png;base64,{b64}"]
         logger.info("[FLUX] EDIT MODE")
     else:
         logger.info("[FLUX] GENERATE MODE")
@@ -218,17 +218,13 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
 
             for _ in range(50):
                 await asyncio.sleep(2)
-
                 async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as r:
                     if r.status != 200:
                         continue
-
                     data = await r.json()
-
                     if data.get("status") == "completed":
                         url = None
                         d = data.get("data")
-
                         if isinstance(d, str):
                             url = d
                         elif isinstance(d, dict):
@@ -236,29 +232,24 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
                         elif isinstance(d, list) and d:
                             first = d[0]
                             url = first if isinstance(first, str) else first.get("url")
-
                         if not url:
                             output = data.get("output", {})
                             images = output.get("images", [])
                             if images:
                                 item = images[0]
                                 url = item if isinstance(item, str) else item.get("url")
-
                         if url:
                             async with session.get(url) as img:
                                 if img.status == 200:
                                     return BytesIO(await img.read())
-
                     if data.get("status") == "failed":
                         if retry:
                             return await generate_with_flux(prompt, reference_image, False)
                         return None
-
         except Exception as e:
             logger.error(f"[FLUX] Exception: {e}")
             if retry:
                 return await generate_with_flux(prompt, reference_image, False)
-
     return None
 
 # ================= FALLBACK =================
