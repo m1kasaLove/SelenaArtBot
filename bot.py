@@ -175,15 +175,15 @@ async def set_referrer(user_id: int, referrer_id: int):
 
 # ================= FLUX GENERATION =================
 # ================= YANDEXART GENERATION =================
-async def generate_with_openai/gpt-5.4-image-2(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
+async def generate_with_openai_gpt_5_4_image_2(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # Базовый payload для YandexART
+    # Базовый payload для OpenAI
     payload = {
-        "model": "yandex/yandex-art",
+        "model": "openai/gpt-5.4-image-2",
         "input": {
             "prompt": f"keep original face, same person, same composition: {prompt}",
             "aspect_ratio": "1:1",
@@ -196,7 +196,7 @@ async def generate_with_openai/gpt-5.4-image-2(prompt: str, reference_image: Byt
         reference_image.seek(0)
         b64 = base64.b64encode(reference_image.read()).decode()
         
-        # YandexART использует поле image + strength
+        # OpenAI использует поле image + strength
         payload["input"]["image"] = f"data:image/png;base64,{b64}"
         payload["input"]["strength"] = 0.2  # Уровень фантазии (0.3-1.0)
         payload["input"]["preserve_original"] = True  # Сохранять контур оригинала
@@ -213,7 +213,7 @@ async def generate_with_openai/gpt-5.4-image-2(prompt: str, reference_image: Byt
                     logger.error(f"[YANDEX] STATUS {resp.status}: {error_text}")
                     if retry:
                         await asyncio.sleep(2)
-                        return await generate_with_yandex(prompt, reference_image, False)
+                        return await generate_with_openai_gpt_5_4_image_2(prompt, reference_image, False)
                     return None
 
                 data = await resp.json()
@@ -249,12 +249,12 @@ async def generate_with_openai/gpt-5.4-image-2(prompt: str, reference_image: Byt
                                     return BytesIO(await img.read())
                     if data.get("status") == "failed":
                         if retry:
-                            return await generate_with_yandex(prompt, reference_image, False)
+                            return await generate_with_openai_gpt_5_4_image_2(prompt, reference_image, False)
                         return None
         except Exception as e:
             logger.error(f"[YANDEX] Exception: {e}")
             if retry:
-                return await generate_with_yandex(prompt, reference_image, False)
+                return await generate_with_openai_gpt_5_4_image_2(prompt, reference_image, False)
     return None
 
 # ================= FALLBACK =================
