@@ -185,7 +185,7 @@ async def generate_with_yandex(prompt: str, reference_image: BytesIO = None, ret
     payload = {
         "model": "yandex/yandex-art",
         "input": {
-            "prompt": f"ultra realistic, 4k cinematic: {prompt}",
+            "prompt": f"keep original face, same person, same composition: {prompt}",
             "aspect_ratio": "1:1",
             "output_format": "png"
         },
@@ -198,7 +198,7 @@ async def generate_with_yandex(prompt: str, reference_image: BytesIO = None, ret
         
         # YandexART использует поле image + strength
         payload["input"]["image"] = f"data:image/png;base64,{b64}"
-        payload["input"]["strength"] = 0.65  # Уровень фантазии (0.3-1.0)
+        payload["input"]["strength"] = 0.2  # Уровень фантазии (0.3-1.0)
         payload["input"]["preserve_original"] = True  # Сохранять контур оригинала
         
         logger.info("[YANDEX] 🖼 EDIT MODE (сохраняем лицо)")
