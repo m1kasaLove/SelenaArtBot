@@ -174,7 +174,6 @@ async def set_referrer(user_id: int, referrer_id: int):
     await redis_client.set(f"selena:ref:by:{user_id}", referrer_id)
 
 # ================= GPT GENERATION =================
-# ================= GPT GENERATION =================
 def build_edit_prompt(user_prompt: str) -> str:
     return f"""Edit the provided image.
 
@@ -207,7 +206,7 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
         reference_image.seek(0)
         b64 = base64.b64encode(reference_image.read()).decode()
         payload["input"]["image"] = f"data:image/png;base64,{b64}"
-        payload["input"]["strength"] = 0.5  # 0.3 — слабо, 1.0 — сильно
+        payload["input"]["strength"] = 0.5
         payload["input"]["negative_prompt"] = "different person, changed face, other gender, distorted features"
         logger.info("[GPT] 🖼 EDIT MODE (сохраняем лицо)")
     else:
@@ -215,10 +214,14 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
         try:
+            logger.info("[GPT] Отправка запроса в Polza...")
             async with session.post("https://polza.ai/api/v1/media", json=payload, headers=headers) as resp:
+                response_text = await resp.text()
+                logger.info(f"[GPT] STATUS {resp.status}")
+                logger.info(f"[GPT] ОТВЕТ: {response_text[:500]}")
+                
                 if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"[GPT] STATUS {resp.status}: {error_text}")
+                    logger.error(f"[GPT] Ошибка {resp.status}: {response_text[:200]}")
                     if retry:
                         await asyncio.sleep(2)
                         return await generate_with_gpt(prompt, reference_image, False)
@@ -227,43 +230,85 @@ async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry:
                 data = await resp.json()
                 task_id = data.get("id")
                 if not task_id:
+                    logger.error("[GPT] Нет ID задачи")
                     return None
+                logger.info(f"[GPT] Task ID: {task_id}")
 
-            for _ in range(50):
+            for attempt in range(60):
                 await asyncio.sleep(2)
+                logger.info(f"[GPT] Попытка {attempt+1}/60, проверяем статус...")
+                
                 async with session.get(f"https://polza.ai/api/v1/media/{task_id}", headers=headers) as r:
                     if r.status != 200:
+                        logger.warning(f"[GPT] Статус ответа: {r.status}")
                         continue
+                    
                     data = await r.json()
-                    if data.get("status") == "completed":
+                    status = data.get("status")
+                    logger.info(f"[GPT] Статус задачи: {status}")
+                    
+                    if status == "completed":
                         url = None
+                        
+                        # Пробуем получить URL разными способами
                         d = data.get("data")
                         if isinstance(d, str):
                             url = d
+                            logger.info(f"[GPT] URL из data (str): {url[:50]}...")
                         elif isinstance(d, dict):
                             url = d.get("url")
+                            logger.info(f"[GPT] URL из data.url: {url[:50]}...")
                         elif isinstance(d, list) and d:
                             first = d[0]
-                            url = first if isinstance(first, str) else first.get("url")
+                            if isinstance(first, str):
+                                url = first
+                            elif isinstance(first, dict):
+                                url = first.get("url")
+                            logger.info(f"[GPT] URL из data[0]: {url[:50]}...")
+                        
                         if not url:
                             output = data.get("output", {})
                             images = output.get("images", [])
                             if images:
                                 item = images[0]
-                                url = item if isinstance(item, str) else item.get("url")
+                                if isinstance(item, str):
+                                    url = item
+                                elif isinstance(item, dict):
+                                    url = item.get("url")
+                                logger.info(f"[GPT] URL из output.images: {url[:50]}...")
+                        
                         if url:
-                            async with session.get(url) as img:
-                                if img.status == 200:
-                                    return BytesIO(await img.read())
-                    if data.get("status") == "failed":
+                            logger.info(f"[GPT] Скачиваю картинку: {url[:80]}...")
+                            async with session.get(url) as img_resp:
+                                if img_resp.status == 200:
+                                    img_bytes = await img_resp.read()
+                                    logger.info(f"[GPT] ✅ Успех! Размер: {len(img_bytes)} байт")
+                                    return BytesIO(img_bytes)
+                                else:
+                                    logger.error(f"[GPT] Ошибка скачивания: {img_resp.status}")
+                        else:
+                            logger.error(f"[GPT] Не удалось найти URL в ответе: {data}")
+                            if retry:
+                                return await generate_with_gpt(prompt, reference_image, False)
+                            return None
+                    
+                    elif status == "failed":
+                        error_msg = data.get("error", {}).get("message", "Unknown error")
+                        logger.error(f"[GPT] ❌ Ошибка: {error_msg}")
                         if retry:
                             return await generate_with_gpt(prompt, reference_image, False)
                         return None
+            
+            logger.error("[GPT] ❌ Таймаут")
+            return None
+            
         except Exception as e:
-            logger.error(f"[GPT] Exception: {e}")
+            logger.error(f"[GPT] Исключение: {e}")
+            import traceback
+            traceback.print_exc()
             if retry:
                 return await generate_with_gpt(prompt, reference_image, False)
-    return None
+            return None
 
 # ================= FALLBACK =================
 async def generate_fallback(prompt: str) -> BytesIO | None:
@@ -498,13 +543,24 @@ async def process_generation(message: types.Message, prompt: str):
             watermarked = await add_watermark(img)
             photo = BufferedInputFile(watermarked.getvalue(), filename="selena.png")
             image_id = str(uuid.uuid4())[:8]
+            await redis_client.setex(f"selena:share:{image_id}", 3600, prompt)
 
-            await message.answer_photo(
-                photo,
-                caption=f"🎨 *{prompt[:100]}*\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
-                parse_mode="Markdown",
-                reply_markup=get_share_keyboard(image_id)
-            )
+            for attempt in range(3):
+                try:
+                    await message.answer_photo(
+                        photo,
+                        caption=f"🎨 *{prompt[:100]}*\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
+                        parse_mode="Markdown",
+                        reply_markup=get_share_keyboard(image_id),
+                        timeout=60
+                    )
+                    await status_msg.delete()
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(f"Таймаут при отправке, попытка {attempt+1}/3")
+                    if attempt == 2:
+                        await status_msg.edit_text("❌ *Ошибка отправки фото*\n\nПопробуй позже", parse_mode="Markdown")
+                    await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"Ошибка при отправке: {e}")
             await status_msg.edit_text("❌ *Ошибка при обработке картинки*", parse_mode="Markdown")
@@ -529,13 +585,24 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
             watermarked = await add_watermark(edited)
             photo = BufferedInputFile(watermarked.getvalue(), filename="edited.png")
             image_id = str(uuid.uuid4())[:8]
+            await redis_client.setex(f"selena:share:{image_id}", 3600, prompt)
 
-            await message.answer_photo(
-                photo,
-                caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
-                parse_mode="Markdown",
-                reply_markup=get_share_keyboard(image_id)
-            )
+            for attempt in range(3):
+                try:
+                    await message.answer_photo(
+                        photo,
+                        caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
+                        parse_mode="Markdown",
+                        reply_markup=get_share_keyboard(image_id),
+                        timeout=60
+                    )
+                    await status_msg.delete()
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(f"Таймаут при отправке, попытка {attempt+1}/3")
+                    if attempt == 2:
+                        await status_msg.edit_text("❌ *Ошибка отправки фото*\n\nПопробуй позже", parse_mode="Markdown")
+                    await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"Ошибка при отправке: {e}")
             await status_msg.edit_text("❌ *Ошибка при обработке картинки*", parse_mode="Markdown")
