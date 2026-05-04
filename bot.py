@@ -174,19 +174,20 @@ async def set_referrer(user_id: int, referrer_id: int):
     await redis_client.set(f"selena:ref:by:{user_id}", referrer_id)
 
 # ================= FLUX GENERATION =================
-async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
+# ================= YANDEXART GENERATION =================
+async def generate_with_yandex(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # ✅ ПРАВИЛЬНЫЙ БАЗОВЫЙ PAYLOAD
+    # Базовый payload для YandexART
     payload = {
-        "model": "black-forest-labs/flux.2-pro",
+        "model": "yandex/yandex-art",
         "input": {
             "prompt": f"ultra realistic, 4k cinematic: {prompt}",
             "aspect_ratio": "1:1",
-            "image_resolution": "2K"
+            "output_format": "png"
         },
         "async": True
     }
@@ -194,21 +195,25 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
     if reference_image:
         reference_image.seek(0)
         b64 = base64.b64encode(reference_image.read()).decode()
-        # ✅ ДЛЯ РЕДАКТИРОВАНИЯ ДОБАВЛЯЕМ images
-        payload["input"]["images"] = [f"data:image/png;base64,{b64}"]
-        logger.info("[FLUX] EDIT MODE")
+        
+        # YandexART использует поле image + strength
+        payload["input"]["image"] = f"data:image/png;base64,{b64}"
+        payload["input"]["strength"] = 0.65  # Уровень фантазии (0.3-1.0)
+        payload["input"]["preserve_original"] = True  # Сохранять контур оригинала
+        
+        logger.info("[YANDEX] 🖼 EDIT MODE (сохраняем лицо)")
     else:
-        logger.info("[FLUX] GENERATE MODE")
+        logger.info("[YANDEX] 🎨 GENERATE MODE")
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
         try:
             async with session.post("https://polza.ai/api/v1/media", json=payload, headers=headers) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    logger.error(f"[FLUX] STATUS {resp.status}: {error_text}")
+                    logger.error(f"[YANDEX] STATUS {resp.status}: {error_text}")
                     if retry:
                         await asyncio.sleep(2)
-                        return await generate_with_flux(prompt, reference_image, False)
+                        return await generate_with_yandex(prompt, reference_image, False)
                     return None
 
                 data = await resp.json()
@@ -244,12 +249,12 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
                                     return BytesIO(await img.read())
                     if data.get("status") == "failed":
                         if retry:
-                            return await generate_with_flux(prompt, reference_image, False)
+                            return await generate_with_yandex(prompt, reference_image, False)
                         return None
         except Exception as e:
-            logger.error(f"[FLUX] Exception: {e}")
+            logger.error(f"[YANDEX] Exception: {e}")
             if retry:
-                return await generate_with_flux(prompt, reference_image, False)
+                return await generate_with_yandex(prompt, reference_image, False)
     return None
 
 # ================= FALLBACK =================
@@ -266,14 +271,14 @@ async def generate_fallback(prompt: str) -> BytesIO | None:
     return None
 
 async def generate_image(prompt: str) -> BytesIO | None:
-    result = await generate_with_flux(prompt)
+    result = await generate_with_yandex(prompt)
     if result:
         return result
-    logger.warning("[GEN] FLUX не ответил, пробуем fallback")
+    logger.warning("[GEN] YandexART не ответил, пробуем fallback")
     return await generate_fallback(prompt)
 
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    return await generate_with_flux(prompt, reference_image=image_bytes)
+    return await generate_with_yandex(prompt, reference_image=image_bytes)
 
 # ================= WATERMARK =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
