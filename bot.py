@@ -173,19 +173,18 @@ async def has_referral(user_id: int) -> bool:
 async def set_referrer(user_id: int, referrer_id: int):
     await redis_client.set(f"selena:ref:by:{user_id}", referrer_id)
 
-# ================= FLUX GENERATION =================
-# ================= YANDEXART GENERATION =================
-async def generate_with_openai_gpt_5_4_image_2(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
+# ================= GPT GENERATION =================
+async def generate_with_gpt(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # Базовый payload для OpenAI
+    # Базовый payload для GPT
     payload = {
         "model": "openai/gpt-5.4-image-2",
         "input": {
-            "prompt": f"keep original face, same person, same composition: {prompt}",
+            "prompt": f"same person, same face, keep identity, minimal changes: {prompt}",
             "aspect_ratio": "1:1",
             "output_format": "png"
         },
@@ -196,24 +195,22 @@ async def generate_with_openai_gpt_5_4_image_2(prompt: str, reference_image: Byt
         reference_image.seek(0)
         b64 = base64.b64encode(reference_image.read()).decode()
         
-        # OpenAI использует поле image + strength
+        # GPT использует поле image
         payload["input"]["image"] = f"data:image/png;base64,{b64}"
-        payload["input"]["strength"] = 0.2  # Уровень фантазии (0.3-1.0)
-        payload["input"]["preserve_original"] = True  # Сохранять контур оригинала
         
-        logger.info("[YANDEX] 🖼 EDIT MODE (сохраняем лицо)")
+        logger.info("[GPT] 🖼 EDIT MODE")
     else:
-        logger.info("[YANDEX] 🎨 GENERATE MODE")
+        logger.info("[GPT] 🎨 GENERATE MODE")
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
         try:
             async with session.post("https://polza.ai/api/v1/media", json=payload, headers=headers) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    logger.error(f"[YANDEX] STATUS {resp.status}: {error_text}")
+                    logger.error(f"[GPT] STATUS {resp.status}: {error_text}")
                     if retry:
                         await asyncio.sleep(2)
-                        return await generate_with_openai_gpt_5_4_image_2(prompt, reference_image, False)
+                        return await generate_with_gpt(prompt, reference_image, False)
                     return None
 
                 data = await resp.json()
@@ -249,12 +246,12 @@ async def generate_with_openai_gpt_5_4_image_2(prompt: str, reference_image: Byt
                                     return BytesIO(await img.read())
                     if data.get("status") == "failed":
                         if retry:
-                            return await generate_with_openai_gpt_5_4_image_2(prompt, reference_image, False)
+                            return await generate_with_gpt(prompt, reference_image, False)
                         return None
         except Exception as e:
-            logger.error(f"[YANDEX] Exception: {e}")
+            logger.error(f"[GPT] Exception: {e}")
             if retry:
-                return await generate_with_openai_gpt_5_4_image_2(prompt, reference_image, False)
+                return await generate_with_gpt(prompt, reference_image, False)
     return None
 
 # ================= FALLBACK =================
@@ -271,14 +268,14 @@ async def generate_fallback(prompt: str) -> BytesIO | None:
     return None
 
 async def generate_image(prompt: str) -> BytesIO | None:
-    result = await generate_with_yandex(prompt)
+    result = await generate_with_gpt(prompt)
     if result:
         return result
-    logger.warning("[GEN] YandexART не ответил, пробуем fallback")
+    logger.warning("[GEN] GPT не ответил, пробуем fallback")
     return await generate_fallback(prompt)
 
 async def edit_image(image_bytes: BytesIO, prompt: str) -> BytesIO | None:
-    return await generate_with_yandex(prompt, reference_image=image_bytes)
+    return await generate_with_gpt(prompt, reference_image=image_bytes)
 
 # ================= WATERMARK =================
 async def add_watermark(image_bytes: BytesIO) -> BytesIO:
@@ -344,7 +341,7 @@ async def cmd_start(message: types.Message):
 
     menu = (
         f"🎨 *SelenaArtBot* — твой AI-художник!\n\n"
-        f"🤖 Модель: FLUX.2 Pro\n\n"
+        f"🤖 Модель: GPT-5.4-Image-2\n\n"
         f"📦 У тебя: {pack_gen} ген | {pack_edit} ред\n\n"
         f"🔥 Пригласи друга → +{REFERRAL_REWARD} ген!\n\n"
         f"📝 Команды в меню слева от смайлика\n\n"
@@ -360,7 +357,7 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "📖 *Помощь*\n\n"
-        "🤖 *Модель:* FLUX.2 Pro\n\n"
+        "🤖 *Модель:* GPT-5.4-Image-2\n\n"
         "**Генерация:** напиши описание\n"
         "**Редактирование:** отправь фото + подпись\n\n"
         "🌙 @LunaIsLovelyLunaBot",
@@ -481,7 +478,7 @@ async def payment_success(message: SuccessfulPayment):
 
 # ================= PROCESS =================
 async def process_generation(message: types.Message, prompt: str):
-    status_msg = await message.answer(f"🎨 *Генерирую (FLUX.2 Pro):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🎨 *Генерирую (GPT-5.4):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
 
     img = await generate_image(prompt)
 
@@ -493,7 +490,7 @@ async def process_generation(message: types.Message, prompt: str):
 
             await message.answer_photo(
                 photo,
-                caption=f"🎨 *{prompt[:100]}*\n🤖 FLUX.2 Pro | SelenaArtBot",
+                caption=f"🎨 *{prompt[:100]}*\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
                 parse_mode="Markdown",
                 reply_markup=get_share_keyboard(image_id)
             )
@@ -512,7 +509,7 @@ async def process_generation(message: types.Message, prompt: str):
         pass
 
 async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str):
-    status_msg = await message.answer(f"🖼 *Редактирую (FLUX.2 Pro):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
+    status_msg = await message.answer(f"🖼 *Редактирую (GPT-5.4):* {prompt[:50]}...\n⏳ 10-30 секунд", parse_mode="Markdown")
 
     edited = await edit_image(image_bytes, prompt)
 
@@ -524,7 +521,7 @@ async def process_edit(message: types.Message, image_bytes: BytesIO, prompt: str
 
             await message.answer_photo(
                 photo,
-                caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 FLUX.2 Pro | SelenaArtBot",
+                caption=f"✅ *Отредактировано!*\n📝 {prompt[:100]}\n🤖 GPT-5.4-Image-2 | SelenaArtBot",
                 parse_mode="Markdown",
                 reply_markup=get_share_keyboard(image_id)
             )
