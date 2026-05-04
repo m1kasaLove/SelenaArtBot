@@ -175,7 +175,7 @@ async def set_referrer(user_id: int, referrer_id: int):
 
 # ================= FLUX GENERATION =================
 # ================= YANDEXART GENERATION =================
-async def generate_with_yandex(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
+async def generate_with_openai/gpt-5.4-image-2(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
         "Content-Type": "application/json"
