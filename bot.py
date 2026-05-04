@@ -181,19 +181,21 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
     }
 
     payload = {
-    "model": "black-forest-labs/flux.2-pro",
-    "prompt": f"ultra realistic, 4k cinematic: {prompt}",
-    "resolution": "1080p",
-    "aspect_ratio": "1:1",
-    "output_format": "png",
-    "async": True
-}
+        "model": "black-forest-labs/flux.2-pro",
+        "input": {
+            "prompt": f"ultra realistic, 4k cinematic: {prompt}",
+            "resolution": "1080p",
+            "aspect_ratio": "1:1",
+            "output_format": "png"
+        },
+        "async": True
+    }
 
     if reference_image:
         reference_image.seek(0)
         b64 = base64.b64encode(reference_image.read()).decode()
-        payload["image"] = f"data:image/png;base64,{b64}"
-        payload["strength"] = 0.65
+        payload["input"]["image"] = f"data:image/png;base64,{b64}"
+        payload["input"]["strength"] = 0.65
         logger.info("[FLUX] EDIT MODE")
     else:
         logger.info("[FLUX] GENERATE MODE")
