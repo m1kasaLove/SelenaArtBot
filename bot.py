@@ -16,7 +16,7 @@ from aiogram.types import (
     LabeledPrice, PreCheckoutQuery, SuccessfulPayment, BufferedInputFile,
     InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeDefault
 )
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from PIL import Image, ImageDraw, ImageFont
 
 import redis.asyncio as redis
@@ -173,7 +173,7 @@ async def has_referral(user_id: int) -> bool:
 async def set_referrer(user_id: int, referrer_id: int):
     await redis_client.set(f"selena:ref:by:{user_id}", referrer_id)
 
-# ================= FLUX GENERATION (С RESOLUTION) =================
+# ================= FLUX GENERATION =================
 async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry: bool = True) -> BytesIO | None:
     headers = {
         "Authorization": f"Bearer {POLZA_API_KEY}",
@@ -184,7 +184,7 @@ async def generate_with_flux(prompt: str, reference_image: BytesIO = None, retry
         "model": "black-forest-labs/flux.2-pro",
         "input": {
             "prompt": f"ultra realistic, 4k cinematic: {prompt}",
-            "resolution": "1024x1024",  # ✅ ОБЯЗАТЕЛЬНЫЙ ПАРАМЕТР
+            "resolution": "1024x1024",
             "aspect_ratio": "1:1",
             "output_format": "png"
         },
@@ -314,7 +314,6 @@ async def cmd_start(message: types.Message):
     pack_edit = await get_pack_edits(user_id)
     premium = await is_premium(user_id)
 
-    # ОБРАБОТКА РЕФЕРАЛЬНОЙ ССЫЛКИ
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("ref_"):
         ref_code = args[1].replace("ref_", "")
@@ -767,17 +766,16 @@ async def on_startup(app):
     global redis_client
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
     logger.info("✅ Redis connected")
+
     await set_commands()
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"✅ Webhook set: {WEBHOOK_URL}")
-    await dp.startup(bot)
     logger.info("✅ Bot started properly")
 
 async def on_shutdown(app):
-    await dp.shutdown(bot)
     if redis_client:
-        await redis_client.close()
+        await redis_client.aclose()
     await bot.session.close()
     logger.info("✅ Bot shutdown")
 
@@ -785,7 +783,6 @@ def create_app():
     app = web.Application()
     app.router.add_get("/", lambda r: web.Response(text="SelenaArtBot is alive! 🎨"))
     SimpleRequestHandler(dp, bot).register(app, path=WEBHOOK_PATH)
-    setup_application(app, dp, bot=bot)
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     return app
